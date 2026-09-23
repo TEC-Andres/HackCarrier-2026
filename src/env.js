@@ -14,6 +14,8 @@ export const env = createEnv({
     AUTH_DISCORD_ID: z.string().optional(),
     AUTH_DISCORD_SECRET: z.string().optional(),
     DATABASE_URL: z.string().url(),
+    NEON_FUNCTION_API_BASE_URL: z.string().url().optional(),
+    HELLO_BACKEND_URL: z.string().url().optional(),
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
@@ -37,6 +39,8 @@ export const env = createEnv({
     AUTH_DISCORD_ID: process.env.AUTH_DISCORD_ID,
     AUTH_DISCORD_SECRET: process.env.AUTH_DISCORD_SECRET,
     DATABASE_URL: process.env.DATABASE_URL,
+    NEON_FUNCTION_API_BASE_URL: process.env.NEON_FUNCTION_API_BASE_URL,
+    HELLO_BACKEND_URL: process.env.HELLO_BACKEND_URL,
     NODE_ENV: process.env.NODE_ENV,
   },
   /**
