@@ -56,14 +56,14 @@ export async function getHelloWorld(
     const body = (await res.json()) as { message?: string };
 
     return {
-      message: body.message ?? "Hello World from the backend",
+      message: body.message ?? "Not found",
       source: "http",
       target,
       status: res.status,
     };
   } catch {
     return {
-      message: "Hello World from the backend",
+      message: "Not found",
       source: "inline",
       target,
       status: null,
