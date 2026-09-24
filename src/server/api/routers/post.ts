@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { getHelloWorld } from "~/server/hello";
 import {
   createTRPCRouter,
   protectedProcedure,
@@ -14,6 +15,10 @@ export const postRouter = createTRPCRouter({
         greeting: `Hello ${input.text}`,
       };
     }),
+
+  helloBackend: publicProcedure.mutation(async ({ ctx }) => {
+    return getHelloWorld(ctx.headers);
+  }),
 
   create: protectedProcedure
     .input(z.object({ name: z.string().min(1) }))

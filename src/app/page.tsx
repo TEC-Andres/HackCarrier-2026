@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { HelloButton } from "~/app/_components/hello-button";
 import { LatestPost } from "~/app/_components/post";
 import { auth } from "~/server/auth";
 import { api, HydrateClient } from "~/trpc/server";
@@ -47,6 +48,8 @@ export default async function Home() {
             <p className="text-2xl text-white">
               {hello ? hello.greeting : "Loading tRPC query..."}
             </p>
+
+            <HelloButton />
 
             <div className="flex flex-col items-center justify-center gap-4">
               <p className="text-center text-2xl text-white">

@@ -20,7 +20,7 @@ If you are not familiar with the different technologies used in this project, pl
 npm install
 # Start PostgreSQL (Docker): ./start-database.sh
 npm run db:push
-x
+npm run dev
 ```
 
 To start/stop the PostgreSQL database, you can use the provided scripts:
@@ -42,3 +42,29 @@ You can check out the [create-t3-app GitHub repository](https://github.com/t3-os
 ## How do I deploy this?
 
 Follow our deployment guides for [Vercel](https://create.t3.gg/en/deployment/vercel), [Netlify](https://create.t3.gg/en/deployment/netlify) and [Docker](https://create.t3.gg/en/deployment/docker) for more information.
+
+### Vercel + Neon
+
+`.env.local` is not deployed. In Vercel → Project Settings → Environment Variables, set at least:
+
+| Key | Value |
+| --- | --- |
+| `AUTH_SECRET` | same as `.env.local` |
+| `DATABASE_URL` | Neon **pooled** URL (`…-pooler.…`, `sslmode=require`) |
+| `DATABASE_URL_UNPOOLED` | Neon **direct** URL (`…`, `sslmode=require`) |
+| `HELLO_BACKEND_URL` | (server-side hello cURL target; defaults to `https://$VERCEL_URL/api/hello` on Vercel) |
+
+Optional: `AUTH_DISCORD_ID`, `AUTH_DISCORD_SECRET`, `DATABASE_URL_UNPOOLED` (direct URL for migrations), `HELLO_BACKEND_URL` (server-side hello cURL target; defaults to `https://$VERCEL_URL/api/hello` on Vercel). `prisma.config.ts` loads `.env.local` only when present; on Vercel it uses these injected vars, so the Neon connection string stays the same.
+
+### Hello cURL test
+
+The home page button **Say Hello (cURL)** runs entirely on the server: tRPC `post.helloBackend` issues an HTTP GET (Node `fetch`, same idea as cURL) to `/api/hello` and returns `Hello World from the backend`.
+
+Manual checks:
+
+```bash
+curl http://127.0.0.1:3000/api/hello
+curl -X POST http://127.0.0.1:3000/api/trpc/post.helloBackend
+# after deploy:
+curl https://<your-app>.vercel.app/api/hello
+```
