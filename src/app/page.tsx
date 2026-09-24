@@ -24,7 +24,7 @@ const modules = [
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-background">
+    <div className="flex min-h-screen flex-col bg-background">
       <header className="border-b border-border bg-card">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
           <div className="flex items-center gap-3">
@@ -50,7 +50,7 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-4 py-12 md:py-16">
+      <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-12 md:py-16">
         <section className="max-w-2xl">
           <p className="text-xs font-semibold uppercase tracking-widest text-accent">
             Connected cold chain
