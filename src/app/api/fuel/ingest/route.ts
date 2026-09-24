@@ -1,7 +1,8 @@
-import type { AlertType } from "../../../../../generated/prisma";
+import { Prisma, type AlertType } from "../../../../../generated/prisma";
 
 import { z } from "zod";
 
+import { physicsSchema } from "~/lib/fuel-physics-schema";
 import { db } from "~/server/db";
 
 const readingSchema = z.object({
@@ -9,6 +10,9 @@ const readingSchema = z.object({
   level: z.number().min(0),
   speed: z.number().optional().default(0),
   accel: z.number().optional().default(0),
+  // Opcional: solo el tick de 1 Hz del bridge lo incluye (ver
+  // PHYSICS_CONTRACT.md). Lecturas viejas/sin este campo siguen validas.
+  physics: physicsSchema.optional(),
 });
 
 const alertSchema = z.object({
@@ -98,6 +102,7 @@ async function handle(payload: IngestPayload) {
         level: r.level,
         speed: r.speed,
         accel: r.accel,
+        physics: r.physics ?? Prisma.DbNull,
       }))
       .filter((r) => !isNaN(r.timestamp.getTime()));
 
