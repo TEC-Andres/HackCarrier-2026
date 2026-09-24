@@ -1,5 +1,11 @@
+import { existsSync } from "node:fs";
+
 import { PrismaClient } from "../../generated/prisma";
 import { detectAnomalies } from "./anomaly-detection";
+
+if (existsSync(".env.local")) {
+  process.loadEnvFile(".env.local");
+}
 
 const db = new PrismaClient();
 

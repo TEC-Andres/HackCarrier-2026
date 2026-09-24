@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { DetectButton } from "~/app/_components/detect-button";
 import { HelloButton } from "~/app/_components/hello-button";
 import { LatestPost } from "~/app/_components/post";
 import { auth } from "~/server/auth";
@@ -50,6 +51,8 @@ export default async function Home() {
             </p>
 
             <HelloButton />
+
+            <DetectButton />
 
             <div className="flex flex-col items-center justify-center gap-4">
               <p className="text-center text-2xl text-white">

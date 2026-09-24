@@ -13,7 +13,13 @@ export const env = createEnv({
         : z.string().optional(),
     AUTH_DISCORD_ID: z.string().optional(),
     AUTH_DISCORD_SECRET: z.string().optional(),
-    DATABASE_URL: z.string().url(),
+    DATABASE_URL: z
+      .string()
+      .url()
+      .refine((url) => url.startsWith("postgresql://"), {
+        message:
+          "DATABASE_URL must be a postgresql:// Neon connection string, not an https:// URL",
+      }),
     NEON_FUNCTION_API_BASE_URL: z.string().url().optional(),
     HELLO_BACKEND_URL: z.string().url().optional(),
     NODE_ENV: z

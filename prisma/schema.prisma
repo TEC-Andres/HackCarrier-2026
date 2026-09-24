@@ -97,8 +97,10 @@ model Alert {
     confidence Float
     reason     String
     dropAmount Float
+    atIndex    Int
     createdAt  DateTime  @default(now())
 
+    @@unique([vehicleId, atIndex])
     @@index([vehicleId, createdAt])
 }
 
