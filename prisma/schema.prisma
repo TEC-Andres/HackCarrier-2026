@@ -84,6 +84,7 @@ model FuelReading {
     level     Float
     speed     Float?
     accel     Float?
+    physics   Json?
 
     @@index([vehicleId, timestamp])
 }

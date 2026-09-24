@@ -9,8 +9,12 @@ Uso:
 
 Contrato del payload (mismos campos que el dashboard ya consume):
     vehicle: {label, tankSize}                  # tankSize en litros
-    readings: [{timestamp, level, speed, accel}]
+    readings: [{timestamp, level, speed, accel, physics?}]
         level en % del tanque (0-100), speed en km/h, accel en g
+        physics: PhysicsTelemetry (schema 1, ver PHYSICS_CONTRACT.md),
+            presente solo en el tick de 1 Hz (el edge muestrea a 10 Hz;
+            el resto de las lecturas van sin este campo, compatible con
+            el dashboard existente que no lo usa)
     alerts: [{timestamp, kind, confidence, explanation, dropAmount}]
         confidence 0..1 (Event.confidence del monitor / 100)
 """
@@ -28,9 +32,11 @@ from datetime import datetime, timedelta, timezone
 from cusum import RobustFuelMonitor
 from scenarios import ScenarioController, demo_script
 from tank_model import FuelTank, RoadProfile, TankConfig
+from telemetry import physics_snapshot
 from virtual_edge import VirtualEdge
 
 FLUSH_EVERY_S = 1.0
+EDGE_SAMPLES_PER_PHYSICS_TICK = 10  # edge muestrea a 10 Hz -> physics a 1 Hz
 
 
 class Bridge:
@@ -138,6 +144,8 @@ def main() -> None:
     pending_readings: list = []
     pending_alerts: list = []
     next_flush_t = FLUSH_EVERY_S
+    edge_sample_count = 0
+    physics_attached_count = 0
 
     while tank.t < args.duration:
         road.step(cfg.dt, tank.t)
@@ -152,6 +160,9 @@ def main() -> None:
                     time.sleep(min(delay, 0.05))
             continue
 
+        edge_sample_count += 1
+        attach_physics = edge_sample_count % EDGE_SAMPLES_PER_PHYSICS_TICK == 0
+
         ctx = controller.context()
         frame["ctx"] = ctx
         ev = monitor.update(
@@ -163,12 +174,16 @@ def main() -> None:
         level_pct = 100.0 * float(frame["voted"]) / cfg.height
         speed = 60.0 if ctx.get("moving") else 0.0
         accel = ((ax * ax + ay * ay) ** 0.5) / 9.81
-        pending_readings.append({
+        reading = {
             "timestamp": ts,
             "level": round(max(0.0, min(100.0, level_pct)), 3),
             "speed": speed,
             "accel": round(float(accel), 4),
-        })
+        }
+        if attach_physics:
+            reading["physics"] = physics_snapshot(tank, ax, ay)
+            physics_attached_count += 1
+        pending_readings.append(reading)
 
         if ev is not None:
             pending_alerts.append({
@@ -194,7 +209,8 @@ def main() -> None:
 
     bridge.flush(pending_readings, pending_alerts)
     print(f"[bridge] fin: posts_ok={bridge.posts_ok} "
-          f"posts_fail={bridge.posts_fail} alerts={bridge.alerts_sent}")
+          f"posts_fail={bridge.posts_fail} alerts={bridge.alerts_sent} "
+          f"readings_con_physics={physics_attached_count}")
 
 
 if __name__ == "__main__":
