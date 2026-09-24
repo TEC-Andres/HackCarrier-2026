@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { TriangleAlert } from "lucide-react";
 import { Badge } from "~/app/_components/ui/badge";
@@ -8,9 +8,11 @@ import { Button } from "~/app/_components/ui/button";
 import { Card } from "~/app/_components/ui/card";
 import { api } from "~/trpc/react";
 import { FLEET_VEHICLES } from "../data/fleet-vehicles";
+import { ROUTES } from "../data/fleet-routes";
+import { getRouteGeometry, type LngLat } from "../data/route-cache";
 import { MapSkeleton } from "./map-skeleton";
 import { VehicleDetailPanel } from "./vehicle-detail-panel";
-import type { MapVehicle, SelectedVehicle } from "./types";
+import type { DisplayAlert, MapRoute, MapVehicle, SelectedVehicle } from "./types";
 
 const FleetMap = dynamic(() => import("./fleet-map").then((mod) => mod.FleetMap), {
   ssr: false,
@@ -21,6 +23,7 @@ export function FleetMapDashboard() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tileState, setTileState] = useState<"loading" | "ready" | "error">("loading");
   const [mapKey, setMapKey] = useState(0);
+  const [routeGeometries, setRouteGeometries] = useState<Record<string, LngLat[] | null>>({});
 
   const vehicleQueries = api.useQueries((t) =>
     FLEET_VEHICLES.map((v) => t.fuel.getVehicle({ label: v.label }))
@@ -30,11 +33,33 @@ export function FleetMapDashboard() {
   const vehiclesResolving = vehicleQueries.some((q) => q.isPending);
   const alerts = alertsQuery.data ?? [];
 
+  // Fetch each unique highway corridor from OSRM exactly once for the whole
+  // page session (route-cache.ts dedupes by coordinate pair), not per render.
+  useEffect(() => {
+    ROUTES.forEach((route) => {
+      void getRouteGeometry(route.from, route.to).then((geometry) => {
+        setRouteGeometries((prev) =>
+          prev[route.id] === geometry ? prev : { ...prev, [route.id]: geometry }
+        );
+      });
+    });
+  }, []);
+
+  const mapRoutes: MapRoute[] = useMemo(
+    () =>
+      ROUTES.filter((r) => routeGeometries[r.id]).map((r) => ({
+        id: r.id,
+        positions: routeGeometries[r.id]!,
+      })),
+    [routeGeometries]
+  );
+
   const resolvedVehicles: SelectedVehicle[] = useMemo(
     () =>
       FLEET_VEHICLES.map((def, i) => {
         const dbId = vehicleQueries[i]?.data?.id ?? null;
-        const hasAlert = dbId !== null && alerts.some((a) => a.vehicleId === dbId);
+        const hasRealAlert = dbId !== null && alerts.some((a) => a.vehicleId === dbId);
+        const hasAlert = hasRealAlert || !!def.simulatedAlert;
         return { ...def, id: def.label, dbId, hasAlert };
       }),
     // vehicleQueries entries change identity every render; read only what we need.
@@ -60,9 +85,27 @@ export function FleetMapDashboard() {
   const readingsLoading = !!selectedVehicle?.dbId && readingsQuery.isPending;
   const readingsError = !!selectedVehicle?.dbId && readingsQuery.isError;
   const readings = selectedVehicle?.dbId ? (readingsQuery.data ?? []) : [];
-  const alertsForSelected = selectedVehicle?.dbId
-    ? alerts.filter((a) => a.vehicleId === selectedVehicle.dbId)
-    : [];
+
+  const alertsForSelected: DisplayAlert[] = selectedVehicle?.dbId
+    ? alerts
+        .filter((a) => a.vehicleId === selectedVehicle.dbId)
+        .map((a) => ({
+          id: a.id,
+          type: a.type,
+          confidence: a.confidence,
+          reason: a.reason,
+          dropAmount: a.dropAmount,
+          simulated: false,
+        }))
+    : selectedVehicle?.simulatedAlert
+      ? [
+          {
+            id: `sim-${selectedVehicle.label}`,
+            ...selectedVehicle.simulatedAlert,
+            simulated: true,
+          },
+        ]
+      : [];
 
   const showSkeleton = tileState === "loading" || vehiclesResolving;
 
@@ -119,6 +162,7 @@ export function FleetMapDashboard() {
             <FleetMap
               key={mapKey}
               vehicles={mapVehicles}
+              routes={mapRoutes}
               selectedId={selectedVehicle?.id ?? null}
               onSelect={setSelectedId}
               onReady={() => setTileState("ready")}

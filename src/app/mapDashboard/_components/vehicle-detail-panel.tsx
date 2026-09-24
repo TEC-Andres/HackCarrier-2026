@@ -18,13 +18,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "~/app/_components/ui/c
 import { cn } from "~/lib/utils";
 import type { RouterOutputs } from "~/trpc/react";
 import { FuelLevelChart } from "./fuel-level-chart";
-import type { SelectedVehicle } from "./types";
+import type { DisplayAlert, SelectedVehicle } from "./types";
 
-type Alert = RouterOutputs["fuel"]["getAlerts"][number];
 type Reading = RouterOutputs["fuel"]["getLatestReadings"][number];
 
 const ALERT_META: Record<
-  Alert["type"],
+  DisplayAlert["type"],
   { label: string; icon: typeof Droplet; badge: "destructive" | "warning" }
 > = {
   THEFT: { label: "Robo de combustible", icon: ShieldAlert, badge: "destructive" },
@@ -42,7 +41,7 @@ export function VehicleDetailPanel({
   onClose,
 }: {
   vehicle: SelectedVehicle | null;
-  alerts: Alert[];
+  alerts: DisplayAlert[];
   readings: Reading[];
   readingsLoading: boolean;
   readingsError: boolean;
@@ -159,9 +158,12 @@ export function VehicleDetailPanel({
                               <Icon className="h-4 w-4 shrink-0" />
                               {meta.label}
                             </span>
-                            <Badge variant={meta.badge}>
-                              {Math.round(alert.confidence * 100)}% confianza
-                            </Badge>
+                            <div className="flex items-center gap-1.5">
+                              {alert.simulated && <Badge variant="outline">Simulado</Badge>}
+                              <Badge variant={meta.badge}>
+                                {Math.round(alert.confidence * 100)}% confianza
+                              </Badge>
+                            </div>
                           </div>
                           <p className="text-xs text-muted-foreground">{alert.reason}</p>
                           <p className="text-[11px] text-muted-foreground">

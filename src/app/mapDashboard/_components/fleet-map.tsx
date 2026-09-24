@@ -15,11 +15,19 @@ import "maplibre-gl/dist/maplibre-gl.css";
 // /public (see public/maplibre-gl-worker.mjs, copied from the installed package).
 setWorkerUrl("/maplibre-gl-worker.mjs");
 import { MapboxOverlay } from "@deck.gl/mapbox";
-import { ScatterplotLayer } from "@deck.gl/layers";
+import { GeoJsonLayer, PathLayer, ScatterplotLayer } from "@deck.gl/layers";
 import type { PickingInfo } from "@deck.gl/core";
-import type { MapVehicle } from "./types";
+import type { MapRoute, MapVehicle } from "./types";
+import mexicoTrunkRoadsData from "../data/mexico-trunk-roads.json";
+import type { FeatureCollection, LineString } from "geojson";
 
-const MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json";
+const mexicoTrunkRoads = mexicoTrunkRoadsData as FeatureCollection<LineString>;
+
+// Voyager renders the road hierarchy (motorways/trunks in color) even at a
+// country-wide zoom, unlike Positron's deliberately minimal styling. Same
+// underlying carto.streets vector tiles and CDN as before, so this adds no
+// extra network weight — only the paint rules differ.
+const MAP_STYLE = "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json";
 
 // Matches the app's design tokens (globals.css): --destructive, emerald-600 (badge
 // "success"), and --accent, expressed as RGB since deck.gl doesn't read CSS vars.
@@ -27,15 +35,21 @@ const COLOR_ALERT: [number, number, number] = [220, 38, 38];
 const COLOR_OK: [number, number, number] = [5, 150, 105];
 const COLOR_SELECTED_RING: [number, number, number] = [37, 99, 235];
 const COLOR_WHITE: [number, number, number, number] = [255, 255, 255, 255];
+const COLOR_ROUTE: [number, number, number, number] = [37, 99, 235, 90];
+// Muted warm gray so the static trunk-road backdrop reads as background
+// texture, not competing with the trucks' own blue route lines.
+const COLOR_TRUNK_ROAD: [number, number, number, number] = [150, 130, 100, 130];
 
 export function FleetMap({
   vehicles,
+  routes,
   selectedId,
   onSelect,
   onReady,
   onError,
 }: {
   vehicles: MapVehicle[];
+  routes: MapRoute[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   onReady: () => void;
@@ -43,12 +57,14 @@ export function FleetMap({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const vehiclesRef = useRef(vehicles);
+  const routesRef = useRef(routes);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
   const onReadyRef = useRef(onReady);
   const onErrorRef = useRef(onError);
 
   vehiclesRef.current = vehicles;
+  routesRef.current = routes;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
   onReadyRef.current = onReady;
@@ -80,6 +96,33 @@ export function FleetMap({
 
       overlay.setProps({
         layers: [
+          new GeoJsonLayer({
+            id: "mexico-trunk-roads",
+            // Static backdrop (Natural Earth 10m roads, filtered to MX major
+            // highways, ~250 features / 63KB — bundled at build time, no
+            // network fetch) so the road network reads at a country-wide
+            // zoom, where the vector basemap alone shows almost nothing.
+            data: mexicoTrunkRoads,
+            pickable: false,
+            stroked: true,
+            filled: false,
+            lineWidthUnits: "pixels",
+            getLineWidth: 1.2,
+            getLineColor: COLOR_TRUNK_ROAD,
+            lineCapRounded: true,
+            lineJointRounded: true,
+          }),
+          new PathLayer<MapRoute>({
+            id: "vehicle-routes",
+            data: routesRef.current,
+            pickable: false,
+            getPath: (r) => r.positions,
+            getColor: COLOR_ROUTE,
+            getWidth: 3,
+            widthUnits: "pixels",
+            capRounded: true,
+            jointRounded: true,
+          }),
           new ScatterplotLayer<MapVehicle>({
             id: "vehicles-pulse",
             data: vs.filter((v) => v.hasAlert),
