@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { generateFluidSimulation } from "~/server/fluid-sim";
+import {
+  FLUID_SCENARIO_IDS,
+  generateFluidSimulation,
+  type FluidScenarioId,
+  type FluidSimulation,
+} from "~/server/fluid-sim";
 
 type Tube = {
   id: string;
@@ -21,6 +26,8 @@ type SimRequestBody = {
   duration?: number;
   fps?: number;
   seed?: number;
+  /** challenge event fluid clip; "all" returns every scenario */
+  scenario?: FluidScenarioId | "all";
 };
 
 type SimResponse = {
@@ -37,7 +44,9 @@ type SimResponse = {
   history: HistoryPoint[];
   image: string;
   /** present when mode is fluid/both — full explosion clip for the UI */
-  fluid?: ReturnType<typeof generateFluidSimulation>;
+  fluid?: FluidSimulation;
+  /** present when scenario: "all" — one clip per challenge event */
+  fluids?: Partial<Record<FluidScenarioId, FluidSimulation>>;
 };
 
 const H_MAX = 4.0;
@@ -157,6 +166,35 @@ function buildSvgChart(history: HistoryPoint[]): string {
   return base64;
 }
 
+function fluidClip(
+  body: SimRequestBody,
+  scenario?: FluidScenarioId,
+): FluidSimulation {
+  // Scenario clips: 6 FPS, 2× time (10 s wall → 20 s sim), max 10 s wall.
+  if (scenario) {
+    return generateFluidSimulation({
+      scenario,
+      duration: Math.min(body.duration ?? 10, 10),
+      fps: body.fps ?? 6,
+      seed: body.seed,
+      timeScale: 2,
+    });
+  }
+  // Legacy splash (no scenario): keep prior 5–8 s @ 12 FPS defaults.
+  return generateFluidSimulation({
+    duration: body.duration,
+    fps: body.fps,
+    seed: body.seed,
+  });
+}
+
+function isFluidScenarioId(v: unknown): v is FluidScenarioId {
+  return (
+    typeof v === "string" &&
+    (FLUID_SCENARIO_IDS as readonly string[]).includes(v)
+  );
+}
+
 export async function POST(request: Request) {
   let body: SimRequestBody = {};
   try {
@@ -165,20 +203,55 @@ export async function POST(request: Request) {
     body = {};
   }
 
-  const mode = body.mode ?? "level";
+  const mode = body.mode ?? (body.scenario ? "fluid" : "level");
   const wantFluid = mode === "fluid" || mode === "both";
   const wantLevel = mode === "level" || mode === "both";
+  const scenarioAll = body.scenario === "all";
+  const scenarioOne = isFluidScenarioId(body.scenario)
+    ? body.scenario
+    : undefined;
 
   // ---- fluid splash clip (Blender-style water for the main sim UI) ----
   if (wantFluid && !wantLevel) {
-    const fluid = generateFluidSimulation({
-      duration: body.duration,
-      fps: body.fps,
-      seed: body.seed,
-    });
+    if (scenarioAll) {
+      const fluids: Partial<Record<FluidScenarioId, FluidSimulation>> = {};
+      for (const id of FLUID_SCENARIO_IDS) {
+        fluids[id] = fluidClip(body, id);
+      }
+      const first = fluids.pothole;
+      const last = first?.frames[first.frames.length - 1];
+      const payload: SimResponse = {
+        t: first?.simDuration ?? 20,
+        h: last?.h ?? 0.34,
+        valve_open: true,
+        overflow: false,
+        sensors: {
+          q_in_lps: Q_IN_LPS,
+          q_valve_lps: 0,
+          q_porous_lps: 0,
+          tubes: TUBE_Z.map((z, i) => ({
+            id: `P${i + 1}`,
+            z,
+            head: 0,
+            flow_lps: 0,
+            saturation: 0,
+          })),
+        },
+        history: (first?.frames ?? []).map(
+          (f) => [f.t, f.h, 1] as HistoryPoint,
+        ),
+        image: "",
+        fluids,
+      };
+      return NextResponse.json(payload, {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    const fluid = fluidClip(body, scenarioOne);
     const last = fluid.frames[fluid.frames.length - 1];
     const payload: SimResponse = {
-      t: fluid.duration,
+      t: fluid.simDuration,
       h: last?.h ?? 0.34,
       valve_open: true,
       overflow: false,
@@ -245,11 +318,7 @@ export async function POST(request: Request) {
   };
 
   if (wantFluid) {
-    payload.fluid = generateFluidSimulation({
-      duration: body.duration,
-      fps: body.fps,
-      seed: body.seed,
-    });
+    payload.fluid = fluidClip(body, scenarioOne);
   }
 
   return NextResponse.json(payload, {

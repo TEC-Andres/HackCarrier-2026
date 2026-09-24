@@ -6,6 +6,21 @@ import type { FluidSimulation } from "~/server/fluid-sim";
 type FluidFrame = FluidSimulation["frames"][number];
 type SimResponse = {
   fluid?: FluidSimulation;
+  fluids?: Partial<Record<string, FluidSimulation>>;
+};
+
+/** Challenge event id — matches `FLUID_SCENARIO_IDS` on the server. */
+export type FluidScenarioId =
+  | "pothole"
+  | "slow_leak"
+  | "theft"
+  | "potholes";
+
+const SCENARIO_LABELS: Record<FluidScenarioId, string> = {
+  pothole: "Pothole",
+  slow_leak: "Slow leak",
+  theft: "Theft",
+  potholes: "Pothole road",
 };
 
 type Cam = {
@@ -854,7 +869,23 @@ function drawFrame(
   drawSensors(ctx, project, sim, frame);
 }
 
-export function FluidSplash(): React.ReactElement {
+type FluidSplashProps = {
+  /** When set, loads a challenge-event clip (6 FPS, 2× time, ≤10 s wall). */
+  scenario?: FluidScenarioId;
+  /** Smaller canvas for the 2×2 "run all" grid. */
+  compact?: boolean;
+  /** Hide transport controls (grid cells). */
+  hideControls?: boolean;
+  /** Initial seed (advanced by New seed / parent remount). */
+  initialSeed?: number;
+};
+
+export function FluidSplash({
+  scenario,
+  compact = false,
+  hideControls = false,
+  initialSeed = 3,
+}: FluidSplashProps = {}): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const camRef = useRef<Cam>({ ...DEFAULT_CAM });
   const dragRef = useRef<{ id: number; x: number; y: number } | null>(null);
@@ -863,35 +894,47 @@ export function FluidSplash(): React.ReactElement {
   const [playing, setPlaying] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [seed, setSeed] = useState(3);
+  const [seed, setSeed] = useState(initialSeed);
   const [camTick, setCamTick] = useState(0);
 
-  const load = useCallback(async (nextSeed: number) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/simulate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "fluid",
-          duration: 6,
-          fps: 12,
-          seed: nextSeed,
-        }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as SimResponse;
-      if (!data.fluid) throw new Error("no fluid payload");
-      setSim(data.fluid);
-      setFrameIdx(0);
-      setPlaying(true);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "failed to load");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (nextSeed: number) => {
+      setLoading(true);
+      setError(null);
+      try {
+        const body = scenario
+          ? {
+              mode: "fluid" as const,
+              scenario,
+              duration: 10,
+              fps: 6,
+              seed: nextSeed,
+            }
+          : {
+              mode: "fluid" as const,
+              duration: 6,
+              fps: 12,
+              seed: nextSeed,
+            };
+        const res = await fetch("/api/simulate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as SimResponse;
+        if (!data.fluid) throw new Error("no fluid payload");
+        setSim(data.fluid);
+        setFrameIdx(0);
+        setPlaying(true);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "failed to load");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [scenario],
+  );
 
   useEffect(() => {
     void load(seed);
@@ -967,26 +1010,43 @@ export function FluidSplash(): React.ReactElement {
   };
 
   const frame = sim?.frames[frameIdx];
+  const wallT = sim ? frameIdx / sim.fps : 0;
+  const title = scenario ? SCENARIO_LABELS[scenario] : null;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <div className="border-border relative overflow-hidden rounded-xl border bg-[#12151c] shadow-2xl">
         <canvas
           ref={canvasRef}
-          className="block h-[min(70vh,640px)] w-full touch-none"
-          aria-label="Fluid splash simulation — drag to orbit"
+          className={
+            compact
+              ? "block h-[min(32vh,260px)] w-full touch-none"
+              : "block h-[min(70vh,640px)] w-full touch-none"
+          }
+          aria-label={
+            title
+              ? `Fluid scenario: ${title} — drag to orbit`
+              : "Fluid splash simulation — drag to orbit"
+          }
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
           onWheel={onWheel}
         />
-        <div className="pointer-events-none absolute top-3 right-3 rounded-md bg-black/45 px-2.5 py-1.5 font-mono text-[11px] text-white/70 backdrop-blur">
-          drag = orbit · drag up = look up · wheel = zoom
-        </div>
+        {!compact && (
+          <div className="pointer-events-none absolute top-3 right-3 rounded-md bg-black/45 px-2.5 py-1.5 font-mono text-[11px] text-white/70 backdrop-blur">
+            drag = orbit · drag up = look up · wheel = zoom
+          </div>
+        )}
+        {title && (
+          <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 rounded-md bg-black/55 px-2.5 py-1 font-mono text-[11px] font-semibold tracking-wide text-white/90 uppercase backdrop-blur">
+            {title}
+          </div>
+        )}
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40 text-sm text-white/80">
-            Generating splash…
+            Generating scenario…
           </div>
         )}
         {error && (
@@ -1002,73 +1062,95 @@ export function FluidSplash(): React.ReactElement {
           </div>
         )}
         {frame && (
-          <div className="absolute top-3 left-3 rounded-md bg-black/45 px-2.5 py-1.5 font-mono text-[11px] text-white/85 backdrop-blur">
-            t={frame.t.toFixed(2)}s · droplets={frame.particles.n} · peak z=
-            {frame.maxZ.toFixed(2)}m · R×{frame.morph.toFixed(3)}
-            <br />
-            free z = {frame.sensorZ.map((z) => z.toFixed(3)).join(" / ")}
-            <br />
-            wells = {frame.tubeZ.map((z) => z.toFixed(3)).join(" / ")} m
+          <div
+            className={
+              compact
+                ? "pointer-events-none absolute bottom-2 left-2 rounded-md bg-black/50 px-2 py-1 font-mono text-[10px] text-white/85"
+                : "pointer-events-none absolute top-3 left-3 rounded-md bg-black/45 px-2.5 py-1.5 font-mono text-[11px] text-white/85 backdrop-blur"
+            }
+          >
+            sim t={frame.t.toFixed(2)}s · wall {wallT.toFixed(1)}s · h=
+            {frame.h.toFixed(3)}m
+            {!compact && (
+              <>
+                <br />
+                droplets={frame.particles.n} · peak z={frame.maxZ.toFixed(2)}m
+                <br />
+                free z = {frame.sensorZ.map((z) => z.toFixed(3)).join(" / ")}
+                <br />
+                wells = {frame.tubeZ.map((z) => z.toFixed(3)).join(" / ")} m
+              </>
+            )}
+            {sim?.scenario && (
+              <>
+                <br />
+                {sim.timeScale}× · {sim.fps} FPS · {sim.frames.length} frames ·{" "}
+                {sim.simDuration.toFixed(0)}s sim / {sim.duration.toFixed(0)}s
+                wall
+              </>
+            )}
           </div>
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={() => setPlaying((p) => !p)}
-          className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm font-medium hover:opacity-90"
-          disabled={!sim}
-        >
-          {playing ? "Pause" : "Play"}
-        </button>
-        <button
-          type="button"
-          onClick={() => setFrameIdx(0)}
-          className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
-          disabled={!sim}
-        >
-          Reset
-        </button>
-        <button
-          type="button"
-          onClick={() => setSeed((s) => s + 1)}
-          className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
-          disabled={loading}
-        >
-          New seed
-        </button>
-        <button
-          type="button"
-          onClick={resetCam}
-          className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
-        >
-          Reset view
-        </button>
-        <label className="text-muted-foreground flex items-center gap-2 text-sm">
-          Frame
-          <input
-            type="range"
-            min={0}
-            max={Math.max((sim?.frames.length ?? 1) - 1, 0)}
-            value={frameIdx}
-            onChange={(e) => {
-              setPlaying(false);
-              setFrameIdx(Number(e.target.value));
-            }}
-            className="w-48"
+      {!hideControls && (
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setPlaying((p) => !p)}
+            className="bg-primary text-primary-foreground rounded-md px-3 py-1.5 text-sm font-medium hover:opacity-90"
             disabled={!sim}
-          />
-          <span className="font-mono text-xs tabular-nums">
-            {frameIdx + 1}/{sim?.frames.length ?? "—"}
+          >
+            {playing ? "Pause" : "Play"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setFrameIdx(0)}
+            className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
+            disabled={!sim}
+          >
+            Reset
+          </button>
+          <button
+            type="button"
+            onClick={() => setSeed((s) => s + 1)}
+            className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
+            disabled={loading}
+          >
+            New seed
+          </button>
+          <button
+            type="button"
+            onClick={resetCam}
+            className="border-border hover:bg-accent rounded-md border px-3 py-1.5 text-sm"
+          >
+            Reset view
+          </button>
+          <label className="text-muted-foreground flex items-center gap-2 text-sm">
+            Frame
+            <input
+              type="range"
+              min={0}
+              max={Math.max((sim?.frames.length ?? 1) - 1, 0)}
+              value={frameIdx}
+              onChange={(e) => {
+                setPlaying(false);
+                setFrameIdx(Number(e.target.value));
+              }}
+              className="w-48"
+              disabled={!sim}
+            />
+            <span className="font-mono text-xs tabular-nums">
+              {frameIdx + 1}/{sim?.frames.length ?? "—"}
+            </span>
+          </label>
+          <span className="text-muted-foreground ml-auto text-xs">
+            {sim
+              ? `${sim.fps} FPS · wall ${sim.duration}s · sim ${sim.simDuration}s @ ${sim.timeScale}× · seed ${sim.seed}`
+              : ""}
           </span>
-        </label>
-        <span className="text-muted-foreground ml-auto text-xs">
-          {sim
-            ? `${sim.fps} FPS · ${sim.duration}s · ${sim.frames.length} frames · seed ${sim.seed}`
-            : ""}
-        </span>
-      </div>
+        </div>
+      )}
     </div>
   );
 }
