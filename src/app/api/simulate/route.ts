@@ -1,4 +1,10 @@
 import { NextResponse } from "next/server";
+import {
+  FLUID_SCENARIO_IDS,
+  generateFluidSimulation,
+  type FluidScenarioId,
+  type FluidSimulation,
+} from "~/server/fluid-sim";
 
 type Tube = {
   id: string;
@@ -15,6 +21,13 @@ type SimRequestBody = {
   t?: number;
   valve_open?: boolean;
   history?: HistoryPoint[];
+  /** "level" (default, legacy) | "fluid" (splash clip) | "both" */
+  mode?: "level" | "fluid" | "both";
+  duration?: number;
+  fps?: number;
+  seed?: number;
+  /** challenge event fluid clip; "all" returns every scenario */
+  scenario?: FluidScenarioId | "all";
 };
 
 type SimResponse = {
@@ -30,6 +43,10 @@ type SimResponse = {
   };
   history: HistoryPoint[];
   image: string;
+  /** present when mode is fluid/both — full explosion clip for the UI */
+  fluid?: FluidSimulation;
+  /** present when scenario: "all" — one clip per challenge event */
+  fluids?: Partial<Record<FluidScenarioId, FluidSimulation>>;
 };
 
 const H_MAX = 4.0;
@@ -48,8 +65,19 @@ function clampH(h: number): number {
   return Math.min(Math.max(h, 0), H_MAX);
 }
 
-function step(h: number, valveOpen: boolean): { h: number; overflow: boolean; qValve: number; qPorous: number; tubes: Tube[] } {
-  const qValve = valveOpen ? VALVE_AREA * Math.sqrt(2 * G * Math.max(h, 0)) * 1000 : 0;
+function step(
+  h: number,
+  valveOpen: boolean,
+): {
+  h: number;
+  overflow: boolean;
+  qValve: number;
+  qPorous: number;
+  tubes: Tube[];
+} {
+  const qValve = valveOpen
+    ? VALVE_AREA * Math.sqrt(2 * G * Math.max(h, 0)) * 1000
+    : 0;
   const qPorous = POROUS_K * Math.max(h, 0) * 1000;
 
   const tubes: Tube[] = TUBE_Z.map((z) => {
@@ -80,7 +108,9 @@ function step(h: number, valveOpen: boolean): { h: number; overflow: boolean; qV
 
 function rk4(h: number, valveOpen: boolean) {
   const f = (state: number) => {
-    const qValve = valveOpen ? VALVE_AREA * Math.sqrt(2 * G * Math.max(state, 0)) * 1000 : 0;
+    const qValve = valveOpen
+      ? VALVE_AREA * Math.sqrt(2 * G * Math.max(state, 0)) * 1000
+      : 0;
     const qPorous = POROUS_K * Math.max(state, 0) * 1000;
     return (Q_IN_LPS - qValve - qPorous) / 1000 / (Math.PI * 1.5 * 1.5);
   };
@@ -105,14 +135,19 @@ function buildSvgChart(history: HistoryPoint[]): string {
   const ySpan = Math.max(yMax - yMin, 1e-6);
 
   const px = (x: number) => pad.l + ((x - xMin) / xSpan) * (w - pad.l - pad.r);
-  const py = (y: number) => pad.t + (1 - (y - yMin) / ySpan) * (hPx - pad.t - pad.b);
+  const py = (y: number) =>
+    pad.t + (1 - (y - yMin) / ySpan) * (hPx - pad.t - pad.b);
 
-  const points = history.map((p) => `${px(p[0]).toFixed(1)},${py(p[1]).toFixed(1)}`).join(" ");
+  const points = history
+    .map((p) => `${px(p[0]).toFixed(1)},${py(p[1]).toFixed(1)}`)
+    .join(" ");
   const gridLines = [0, 1, 2, 3, 4]
     .map((y) => {
       const yy = py(y).toFixed(1);
-      return `<line x1="${pad.l}" y1="${yy}" x2="${w - pad.r}" y2="${yy}" stroke="#e2e8f0" stroke-width="1"/>` +
-        `<text x="${pad.l - 8}" y="${Number(yy) + 4}" text-anchor="end" font-size="11" fill="#64748b">${y}m</text>`;
+      return (
+        `<line x1="${pad.l}" y1="${yy}" x2="${w - pad.r}" y2="${yy}" stroke="#e2e8f0" stroke-width="1"/>` +
+        `<text x="${pad.l - 8}" y="${Number(yy) + 4}" text-anchor="end" font-size="11" fill="#64748b">${y}m</text>`
+      );
     })
     .join("");
 
@@ -131,6 +166,35 @@ function buildSvgChart(history: HistoryPoint[]): string {
   return base64;
 }
 
+function fluidClip(
+  body: SimRequestBody,
+  scenario?: FluidScenarioId,
+): FluidSimulation {
+  // Scenario clips: 6 FPS, 2× time (10 s wall → 20 s sim), max 10 s wall.
+  if (scenario) {
+    return generateFluidSimulation({
+      scenario,
+      duration: Math.min(body.duration ?? 10, 10),
+      fps: body.fps ?? 6,
+      seed: body.seed,
+      timeScale: 2,
+    });
+  }
+  // Legacy splash (no scenario): keep prior 5–8 s @ 12 FPS defaults.
+  return generateFluidSimulation({
+    duration: body.duration,
+    fps: body.fps,
+    seed: body.seed,
+  });
+}
+
+function isFluidScenarioId(v: unknown): v is FluidScenarioId {
+  return (
+    typeof v === "string" &&
+    (FLUID_SCENARIO_IDS as readonly string[]).includes(v)
+  );
+}
+
 export async function POST(request: Request) {
   let body: SimRequestBody = {};
   try {
@@ -139,11 +203,86 @@ export async function POST(request: Request) {
     body = {};
   }
 
+  const mode = body.mode ?? (body.scenario ? "fluid" : "level");
+  const wantFluid = mode === "fluid" || mode === "both";
+  const wantLevel = mode === "level" || mode === "both";
+  const scenarioAll = body.scenario === "all";
+  const scenarioOne = isFluidScenarioId(body.scenario)
+    ? body.scenario
+    : undefined;
+
+  // ---- fluid splash clip (Blender-style water for the main sim UI) ----
+  if (wantFluid && !wantLevel) {
+    if (scenarioAll) {
+      const fluids: Partial<Record<FluidScenarioId, FluidSimulation>> = {};
+      for (const id of FLUID_SCENARIO_IDS) {
+        fluids[id] = fluidClip(body, id);
+      }
+      const first = fluids.pothole;
+      const last = first?.frames[first.frames.length - 1];
+      const payload: SimResponse = {
+        t: first?.simDuration ?? 20,
+        h: last?.h ?? 0.34,
+        valve_open: true,
+        overflow: false,
+        sensors: {
+          q_in_lps: Q_IN_LPS,
+          q_valve_lps: 0,
+          q_porous_lps: 0,
+          tubes: TUBE_Z.map((z, i) => ({
+            id: `P${i + 1}`,
+            z,
+            head: 0,
+            flow_lps: 0,
+            saturation: 0,
+          })),
+        },
+        history: (first?.frames ?? []).map(
+          (f) => [f.t, f.h, 1] as HistoryPoint,
+        ),
+        image: "",
+        fluids,
+      };
+      return NextResponse.json(payload, {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
+    const fluid = fluidClip(body, scenarioOne);
+    const last = fluid.frames[fluid.frames.length - 1];
+    const payload: SimResponse = {
+      t: fluid.simDuration,
+      h: last?.h ?? 0.34,
+      valve_open: true,
+      overflow: false,
+      sensors: {
+        q_in_lps: Q_IN_LPS,
+        q_valve_lps: 0,
+        q_porous_lps: 0,
+        tubes: TUBE_Z.map((z, i) => ({
+          id: `P${i + 1}`,
+          z,
+          head: 0,
+          flow_lps: 0,
+          saturation: 0,
+        })),
+      },
+      history: fluid.frames.map((f) => [f.t, f.h, 1] as HistoryPoint),
+      image: "",
+      fluid,
+    };
+    return NextResponse.json(payload, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
   const h0 = clampH(typeof body.h === "number" ? body.h : 1.0);
   const t0 = typeof body.t === "number" && Number.isFinite(body.t) ? body.t : 0;
   const valveOpen = body.valve_open !== false;
   const priorHistory: HistoryPoint[] = Array.isArray(body.history)
-    ? body.history.filter((p): p is HistoryPoint => Array.isArray(p) && p.length === 3)
+    ? body.history.filter(
+        (p): p is HistoryPoint => Array.isArray(p) && p.length === 3,
+      )
     : [];
 
   const hRaw = rk4(h0, valveOpen);
@@ -159,7 +298,9 @@ export async function POST(request: Request) {
   const t = t0 + DT;
 
   const nextPoint: HistoryPoint = [t, h, valveOpen ? 1 : 0];
-  const history: HistoryPoint[] = [...priorHistory, nextPoint].slice(-HISTORY_LIMIT);
+  const history: HistoryPoint[] = [...priorHistory, nextPoint].slice(
+    -HISTORY_LIMIT,
+  );
 
   const payload: SimResponse = {
     t,
@@ -175,6 +316,10 @@ export async function POST(request: Request) {
     history,
     image: buildSvgChart(history),
   };
+
+  if (wantFluid) {
+    payload.fluid = fluidClip(body, scenarioOne);
+  }
 
   return NextResponse.json(payload, {
     headers: { "Cache-Control": "no-store" },

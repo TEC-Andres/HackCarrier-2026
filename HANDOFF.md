@@ -273,7 +273,94 @@ Evidencia mínima: tsc verde, validate quick PASS, bridge dry con
 
 ---
 
-*Última sesión: revisión humana+IA aplicada (meshgrid vectorizado,
+## 9. Web fluid splash (`/simulation`, issues #11 + #10)
+
+Simulación de salpicadura estilo Blender en el endpoint principal
+`POST /api/simulate`, con generación fluid-side y player en Canvas 2D.
+Cumple #10: 12 FPS × 5–8 s → 60–96 frames (verificado: 72 frames @ 6 s);
+retos: 6 FPS × 10 s wall → 60 frames (= 20 s sim @ 2×).
+
+### Contrato API (compatible)
+
+| Campo | Notas |
+|---|---|
+| body | `{ h?, t?, valve_open?, history?, mode?: "level"\|"fluid"\|"both", duration?, fps?, seed?, scenario?: "pothole"\|"slow_leak"\|"theft"\|"potholes"\|"all" }` |
+| `mode` default | `"level"` — sin `mode` (dashboard actual) mantiene `{t,h,valve_open,overflow,sensors,history,image}`; con `scenario` default `"fluid"` |
+| `mode:"fluid"` | `{ fluid: FluidSimulation }` |
+| `scenario:"all"` | `{ fluids: Record<FluidScenarioId, FluidSimulation>, fluid, ... }` (4 clips) |
+
+- `src/app/api/simulate/route.ts` — dispatch por mode; path level (rk4 + step + SVG) sin cambios.
+- Dashboard: `src/app/_components/ui/dashboard.tsx` no manda `mode` → sigue en level.
+
+### Retos (challenge scenarios) — 4 clips
+
+| id | Evento | Nivel `h` | Movimiento visible |
+|---|---|---|---|
+| `pothole` | bache único (impactos t=4.5/5.6) | se mantiene ≈0.351 | sensorZ Δ≈0.17 m, tubeZ Δ≈0.03, splash |
+| `slow_leak` | fuga sostenida tras t=4 | 0.351 → ~0.284 (Δ0.067) | drenaje + slosh leve |
+| `theft` | siphon 8–17 s, engine off t≥3 | 0.351 → ~0.225 (Δ0.126) | caída fuerte + disturbio t=8/12 |
+| `potholes` | carretera llena de baches (8 kicks) | se mantiene | slosh continuo, sensorZ Δ≈0.05 |
+
+- **Tiempo**: `fps=6` (playback wall), `timeScale=2` (1 s wall = 2 s sim), `duration` wall ≤10 s → **60 frames = 10 s wall / 20 s sim**. `frame.t` = tiempo de simulación; player avanza 1 frame cada `1/fps` wall s.
+- `scenarioLevelRate`: leak −0.0042 m/s (t≥4), theft −0.014 m/s (8≤t<17), else −0.00002 (nivel de baches casi plano).
+- Level-mode twins en `src/lib/scenarios.ts` (`runScenario`, ids + `potholes`): CUSUM narrative, no ligado al fluid API.
+- UI `/simulation`: botones 1-a-vez + **Run all together** (2×2 compacto, `hideControls`).
+
+### Motor (`src/server/fluid-sim.ts`)
+
+- Port TS del Python: Bessel J1 (A&S), `mulberry32`, slosh modes kR=1.841/5.331.
+- Impactos: legacy t=0.4/2.0/3.3/4.5/5.6; retos via `scenarioImpacts()`.
+- Crown ring + jet central + spray fino + gotas gruesas "blob" (`wet`).
+- Drag + turbulencia OU; pared con morph `wallRadius`; rebote piso; techo `1.02·H`.
+- Spatial-hash `interactParticles`: hard repel + cohesión cuando `wet`.
+- Cohesión free-surface + splash-back al re-merge.
+- Estructuras: `sensors`, `baffles`, `taps`, `tubes` (3 stilling wells), `tubeZ`/`sensorZ`, `simDuration`, `timeScale`, `scenario?`.
+- Partículas empaquetadas 5-tupla `[x,y,z,r,shade]`.
+
+### UI (`src/app/_components/fluid-splash.tsx` + `src/app/simulation/page.tsx`)
+
+- Cámara **Z-up** (world up `(0,0,1)`), default `yaw:-0.55, pitch:-0.22` (mirando **arriba**), `PITCH_MIN/MAX=±1.35`, drag `pitch += dy*0.006` (arrastrar arriba = look up), depth `dot(p−camPos, forward)`.
+- Floor quad en `z=−0.012` bajo el tanque; cilindro de vidrio con radio morph; anillos baffle even-odd.
+- `drawTubes`: tubo poroso **estático** (`makeTubeAxis` sin lean/sway), columna a `frame.tubeZ`, menisco.
+- Gotas metaball (`drawDroplet`): glow 1.55r, paleta wet/superficie, fresnel airborne.
+- Sensores HC-SR04: solo **vertical** (`drawSensors` sin bob lateral) + label + chip valor; haz dashed hasta columna; HUD free z + well z (+ sim/wall/timeScale en scenarios).
+- Props FluidSplash: `scenario?`, `compact?`, `hideControls?`, `initialSeed?`.
+- Controles: play/pause/scrub/seed/reset + retos + Run all.
+
+### Verificación mínima de esta feature
+
+```powershell
+# endpoint fluid (legacy)
+curl -X POST http://localhost:3000/api/simulate `
+  -H "Content-Type: application/json" `
+  -d "{\"mode\":\"fluid\",\"duration\":6,\"fps\":12}"
+# → 200, fluid.frames = 72
+# scenarios
+# POST {"mode":"fluid","scenario":"all"} → 4 clips × 60 frames @6fps, 10s wall / 20s sim
+# POST {"h":0.34} → level keys only (compat dashboard)
+# UI: http://localhost:3000/simulation → 200
+npm run typecheck   # solo error pre-existente fuel/ingest id
+npx eslint src/server/fluid-sim.ts src/app/api/simulate/route.ts `
+  src/app/_components/fluid-splash.tsx src/app/simulation/page.tsx `
+  src/lib/scenarios.ts
+```
+
+Métricas verificadas (seed fija): legacy 72 frames @12fps, peak ~688 droplets,
+`maxZ ≈ 0.458`, escapedFrac 0; scenarios 4×60 frames, h:
+pothole flat 0.351 (sensorZ 0.256–0.427), slow_leak Δ0.067, theft Δ0.126,
+potholes flat + slosh sensorZ Δ0.049; `/simulation` 200; eslint exit 0.
+
+---
+
+*Última sesión: 4 retos fluid en `/simulation` (pothole / slow_leak / theft /
+potholes) — `scenario` + `scenario:"all"` en `POST /api/simulate`, timeScale 2
+(6 FPS, 10 wall = 20 sim), UI one-at-a-time + Run all 2×2, tubos estáticos,
+sensores solo vertical, cámara Z-up look-up. Verificado: 4×60 frames, nivel
+varía en leak/theft, potholes mantiene h con slosh, level-compat OK, tsc solo
+fuel/ingest pre-existente, eslint verde. Pendiente: commit de esta ronda +
+revisión visual.*
+
+*Nota (sesión anterior): revisión humana+IA aplicada (meshgrid vectorizado,
 sensores dinámicos con z_water, color=Z, precompute Bessel tubos,
 tick 1 Hz entero, Bus acotado, RunConfig, sync pipeline, cusum
 refactor, dispatch table scenarios, endpoint /api/fuel/status,
