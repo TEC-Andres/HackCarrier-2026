@@ -27,9 +27,9 @@ export type FleetVehicleDef = {
 /**
  * Hardcoded fleet positions for the demo. Coordinates sit on real towns along
  * existing Mexican highways so markers land on the road, not in open terrain.
- * "Truck-01" is the only vehicle seeded in Neon; the rest resolve to null and
- * render as demo-only markers with no historical data (some carry a
- * simulatedAlert purely for visual variety).
+ * All labels are seeded in Neon; red/green status and chart dips come from
+ * real FuelReading/Alert rows (see prisma/seed.ts) — only Truck-01 and
+ * Truck-05 are red. simulatedAlert is a fallback for labels with no DB row.
  */
 export const FLEET_VEHICLES: FleetVehicleDef[] = [
   {
@@ -52,13 +52,6 @@ export const FLEET_VEHICLES: FleetVehicleDef[] = [
     lng: -101.4667,
     highway: "Carretera Federal 40 · Saltillo–Torreón (General Cepeda, Coah.)",
     routeId: "saltillo-torreon",
-    simulatedAlert: {
-      type: "LEAK",
-      confidence: 0.58,
-      reason:
-        "Descenso gradual y sostenido de combustible durante 40 minutos sin recuperación, consistente con una fuga lenta.",
-      dropAmount: 6.4,
-    },
   },
   {
     label: "Truck-04",
@@ -87,13 +80,6 @@ export const FLEET_VEHICLES: FleetVehicleDef[] = [
     lng: -103.4681,
     highway: "Autopista 54D · Guadalajara–Colima (Ciudad Guzmán, Jal.)",
     routeId: "gdl-colima",
-    simulatedAlert: {
-      type: "THEFT",
-      confidence: 0.87,
-      reason:
-        "Caída abrupta de combustible con el vehículo detenido y sin recuperación posterior, consistente con extracción no autorizada.",
-      dropAmount: 22.5,
-    },
   },
   {
     label: "Truck-08",
