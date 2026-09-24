@@ -106,7 +106,7 @@ def metric_confusion(cfg, runs_per_case: int = 5) -> dict:
     expected = {"normal": "none", "pothole": "none", "refill": "none",
                 "leak": "leak", "theft": "theft"}
     correct = sum(1 for name in truth
-                  if cases[name].count(expected[name]) == 5)
+                  if cases[name].count(expected[name]) == runs_per_case)
     return {"matrix": matrix, "expected": expected,
             "pass": correct == len(truth)}
 
@@ -143,10 +143,7 @@ def main() -> None:
     cfg.dt = 0.05
 
     physics = self_check_sloshing()
-    m0 = physics['modes'][0]
-    print(f"[4] fisica: FFT {m0['f_fft_hz']:.3f} Hz vs analitico "
-          f"{m0['f_analytic_hz']:.3f} Hz ({m0['err_pct']:.2f} %) "
-          f"-> {'PASS' if physics['pass'] else 'FAIL'}")
+    m0 = physics["modes"][0]
 
     if args.quick:
         runs = 5

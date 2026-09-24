@@ -1,12 +1,11 @@
 # Simulador — Modelo matemático del tanque de combustible
 
-Este módulo es el **modelo simulador del Robust Fuel Monitor**, construido
-sobre las ecuaciones matemáticas del problema: un tanque cilíndrico con
-sloshing de orden reducido, caudales en forma cerrada y un detector de
-cambio CUSUM. Corre en Python puro (numpy + matplotlib) y funciona de
-forma independiente del dashboard web — publica eventos en el mismo
-contrato que consume la aplicación (ver `docs/teoria.md` para la
-derivación completa).
+Este módulo es el **modelo matematico del simulador del Robust Fuel
+Monitor**, construido sobre las ecuaciones matemáticas del problema: un
+tanque cilíndrico con sloshing 3D multimodal, caudales en forma cerrada
+y un detector de cambio CUSUM. Corre en Python (numpy + plotly) y
+publica eventos en el mismo contrato que consume la aplicación web
+(ver `docs/teoria.md` para la derivación completa).
 
 ## Fundamentos matemáticos (resumen)
 
@@ -32,9 +31,13 @@ derivación completa).
 
 ```powershell
 pip install -r requirements.txt
-python main.py      # vista animada del tanque
-python pipeline.py  # demo end-to-end (fuga + robo 3am)
-python validate.py  # las 5 métricas del reto (velocidad física)
+python main.py        # visualizacion 3D animada (plotly -> tank3d.html)
+python visual3d.py --scenario demo --baffles on   # flags --baffles/--mu
+python pipeline.py    # demo end-to-end (fuga + robo 3am)
+python validate.py    # las 5 metricas del reto (velocidad fisica)
+python validate.py --quick   # smoke rapido
+python bridge.py --dry       # simulador -> POST /api/fuel/ingest (sin red)
+python bridge.py --api http://localhost:3000 --rt 1 --duration 1280
 ```
 
 ## Validación (resultados en `results/validation.json`)
@@ -50,9 +53,10 @@ python validate.py  # las 5 métricas del reto (velocidad física)
 ## Integración
 
 `pipeline.py` expone un bus de tópicos (`fuel/raw`, `fuel/filtered`,
-`fuel/event`, `tank/state`) con el mismo contrato de mensajes que
-consume la aplicación web; `src/server/anomaly-detection.ts` (rama
-`feature/initial-API-connection`) puede leer estos eventos para
-persistirlos y mostrarlos en el dashboard.
+`fuel/event`, `tank/state`) con el mismo contrato que consume la
+aplicación web. `bridge.py` ejecuta el modelo y hace POST a
+`/api/fuel/ingest` (lecturas 1 Hz + alertas al instante); el backend
+persiste en `FuelReading`/`Alert` y el dashboard lee via tRPC
+(`fuel.getLatestReadings`, `fuel.getAlerts`).
 
 La derivación completa está en [`docs/teoria.md`](docs/teoria.md).

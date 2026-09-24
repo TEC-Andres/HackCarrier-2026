@@ -1,0 +1,75 @@
+{
+  "physics": {
+    "modes": [
+      {
+        "mode": 0,
+        "kR": 1.841,
+        "f_analytic_hz": 1.745927817799772,
+        "f_fft_hz": 1.75,
+        "err_pct": 0.23323886352643597,
+        "pass": true
+      },
+      {
+        "mode": 1,
+        "kR": 5.331,
+        "f_analytic_hz": 2.9717573605161767,
+        "f_fft_hz": 2.97,
+        "err_pct": 0.059135397106284376,
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "false_alarms": {
+    "runs": 5,
+    "duration_s": 300.0,
+    "false_alarms": 0,
+    "pass": true
+  },
+  "leak_curve": {
+    "curve": [
+      {
+        "leak_lpm": 0.8,
+        "detection_delay_s": 60.0,
+        "runs_detected": "1/1"
+      },
+      {
+        "leak_lpm": 0.1,
+        "detection_delay_s": 120.0,
+        "runs_detected": "1/1"
+      }
+    ]
+  },
+  "confusion": {
+    "matrix": {
+      "normal": {
+        "none": 2
+      },
+      "pothole": {
+        "none": 2
+      },
+      "refill": {
+        "none": 2
+      },
+      "leak": {
+        "leak": 2
+      },
+      "theft": {
+        "theft": 2
+      }
+    },
+    "expected": {
+      "normal": "none",
+      "pothole": "none",
+      "refill": "none",
+      "leak": "leak",
+      "theft": "theft"
+    },
+    "pass": true
+  },
+  "baffle_gain": {
+    "amp_on_mm": 1.267,
+    "amp_off_mm": 12.331,
+    "snr_gain": 9.73
+  }
+}

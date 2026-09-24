@@ -27,7 +27,7 @@ export const fuelRouter = createTRPCRouter({
   getVehicle: publicProcedure
     .input(z.object({ label: z.string() }))
     .query(async ({ ctx, input }) => {
-      return ctx.db.vehicle.findUnique({ where: { label: input.label } });
+      return ctx.db.vehicle.findFirst({ where: { label: input.label } });
     }),
 });
 

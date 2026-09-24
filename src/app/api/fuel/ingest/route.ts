@@ -1,6 +1,6 @@
+import type { AlertType } from "../../../../../generated/prisma";
+
 import { db } from "~/server/db";
-import { z } from "zod";
-import { FuelEventType } from "@prisma/client";
 
 function sanitize(message: string): string {
   return message
@@ -37,44 +37,33 @@ function diagnostics(error: unknown): Record<string, string> {
   return diag;
 }
 
-function mapKindToType(kind: string): string {
-  const map: Record<string, string> = {
+function mapKindToType(kind: string): AlertType {
+  const map: Record<string, AlertType> = {
     leak: "LEAK",
     theft: "THEFT",
     refill_unauth: "UNKNOWN",
-    refill: "REFILL",
+    refill: "UNKNOWN",
+    LEAK: "LEAK",
+    THEFT: "THEFT",
+    POTHOLE_OR_SLOSH: "POTHOLE_OR_SLOSH",
+    UNKNOWN: "UNKNOWN",
   };
   return map[kind] ?? "UNKNOWN";
 }
 
-async function handle(request: Request) {
-  const token = process.env.FUEL_INGEST_TOKEN;
-  const authHeader = request.headers.get("authorization");
-  if (token && authHeader !== `Bearer ${token}`) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
-  }
+async function handle(payload: any) {
+  const { vehicle: vehicleInput, readings = [], alerts = [] } = payload;
 
-  let payload: any;
-  try {
-    payload = await request.json();
-  } catch {
-    return Response.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-
-  const { vehicle, readings = [], alerts = [] } = payload;
-
-  if (!vehicle || !vehicle.label || !vehicle.tankSize) {
+  if (!vehicleInput?.label || !vehicleInput?.tankSize) {
     return Response.json({ error: "Missing vehicle label or tankSize" }, { status: 400 });
   }
 
-  // Upsert vehicle
   const vehicle = await db.vehicle.upsert({
-    where: { label: vehicle.label },
-    update: { tankSize: vehicle.tankSize },
-    create: { label: vehicle.label, tankSize: vehicle.tankSize },
+    where: { label: vehicleInput.label },
+    update: { tankSize: vehicleInput.tankSize },
+    create: { label: vehicleInput.label, tankSize: vehicleInput.tankSize },
   });
 
-  // Insert readings
   if (readings.length > 0) {
     const validReadings = readings
       .map((r: any) => ({
@@ -84,7 +73,8 @@ async function handle(request: Request) {
         speed: r.speed ?? 0,
         accel: r.accel ?? 0,
       }))
-      .filter((r) => r.level >= 0 && r.timestamp instanceof Date && !isNaN(r.timestamp.getTime()));
+      .filter((r: { level: number; timestamp: Date }) =>
+        r.level >= 0 && !isNaN(r.timestamp.getTime()));
 
     if (validReadings.length > 0) {
       await db.fuelReading.createMany({
@@ -94,32 +84,36 @@ async function handle(request: Request) {
     }
   }
 
-  // Process alerts
   if (alerts.length > 0) {
-    // Fetch all existing readings to compute atIndex
     const allReadings = await db.fuelReading.findMany({
       where: { vehicleId: vehicle.id },
       orderBy: { timestamp: "asc" },
-      select: { id: true, timestamp: true },
+      select: { timestamp: true },
     });
 
-    const alertData = alerts
-      .map((a: any) => {
-        const ts = new Date(a.timestamp);
-        if (!(ts instanceof Date) || isNaN(ts.getTime())) return null;
-        // atIndex = number of readings with timestamp <= alert timestamp - 1
-        const atIndex = allReadings.filter((r) => r.timestamp <= ts).length - 1;
-        if (atIndex < 0) return null;
-        return {
-          vehicleId: vehicle.id,
-          type: a.type || "UNKNOWN",
-          confidence: typeof a.confidence === "number" ? a.confidence : 0.5,
-          reason: a.reason ?? "detected by simulator",
-          dropAmount: a.dropAmount ?? 0,
-          atIndex: Math.max(0, atIndex),
-        };
-      })
-      .filter((a): a is NonNullable<typeof a> => a !== null);
+    type AlertRow = {
+      vehicleId: string;
+      type: AlertType;
+      confidence: number;
+      reason: string;
+      dropAmount: number;
+      atIndex: number;
+    };
+
+    const alertData: AlertRow[] = [];
+    for (const a of alerts as any[]) {
+      const ts = new Date(a.timestamp);
+      if (isNaN(ts.getTime())) continue;
+      const atIndex = allReadings.filter((r) => r.timestamp <= ts).length - 1;
+      alertData.push({
+        vehicleId: vehicle.id,
+        type: mapKindToType(a.kind ?? a.type ?? ""),
+        confidence: typeof a.confidence === "number" ? a.confidence : 0.5,
+        reason: a.explanation ?? a.reason ?? "detected by simulator",
+        dropAmount: typeof a.dropAmount === "number" ? a.dropAmount : 0,
+        atIndex: Math.max(0, atIndex),
+      });
+    }
 
     if (alertData.length > 0) {
       await db.alert.createMany({
@@ -129,14 +123,25 @@ async function handle(request: Request) {
     }
   }
 
-  return Response.json({ success: true });
+  return Response.json({ success: true, vehicleId: vehicle.id });
 }
 
 export async function POST(request: Request) {
   try {
-    const payload = await request.json();
-    const result = await handle(request);
-    return Response.json({ success: true });
+    const token = process.env.FUEL_INGEST_TOKEN;
+    const authHeader = request.headers.get("authorization");
+    if (token && authHeader !== `Bearer ${token}`) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    let payload: any;
+    try {
+      payload = await request.json();
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    return await handle(payload);
   } catch (error) {
     console.error("[api/fuel/ingest]", error);
     return Response.json(
@@ -149,7 +154,6 @@ export async function POST(request: Request) {
   }
 }
 
-export async function GET(request: Request) {
-  // Health check / latest state
+export async function GET() {
   return Response.json({ status: "ok" });
 }
