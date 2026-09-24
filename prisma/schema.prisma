@@ -68,7 +68,7 @@ model VerificationToken {
 
 model Vehicle {
     id       String @id @default(cuid())
-    label    String
+    label    String @unique
     tankSize Float
 
     readings FuelReading[]
