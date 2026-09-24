@@ -1,7 +1,21 @@
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
+import { getPhysicsSnapshot } from "~/server/fuel-physics";
 
 export const fuelRouter = createTRPCRouter({
+  getLatestPhysics: publicProcedure
+    .input(
+      z
+        .object({ label: z.string().optional(), history: z.number().optional() })
+        .optional(),
+    )
+    .query(async ({ input }) => {
+      return getPhysicsSnapshot({
+        label: input?.label,
+        history: input?.history,
+      });
+    }),
+
   getLatestReadings: publicProcedure
     .input(z.object({ vehicleId: z.string().optional(), take: z.number().optional() }).optional())
     .query(async ({ ctx, input }) => {

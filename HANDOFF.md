@@ -116,6 +116,9 @@ python bridge.py --api http://localhost:3000 --rt 1 --duration 1280
 - `FuelReading { vehicleId, timestamp, level, speed?, accel? }`
   - `level` en **% del tanque (0–100)** en el pipeline del bridge
     (el seed del equipo usa escala ~100; anomaly-detection es relativo).
+  - `physics Json?` (nuevo) — telemetria completa (`PhysicsTelemetry`
+    schema 1: modos de slosh, caudales, tubos, geometria); solo presente
+    en el tick de 1 Hz del bridge. Ver `PHYSICS_CONTRACT.md`.
 - `Alert { vehicleId, type: AlertType, confidence, reason, dropAmount, atIndex }`
   - `AlertType = POTHOLE_OR_SLOSH | LEAK | THEFT | UNKNOWN` (**no hay REFILL**;
     refill mapea a `UNKNOWN`).
@@ -127,12 +130,14 @@ python bridge.py --api http://localhost:3000 --rt 1 --duration 1280
 | Endpoint | Archivo | Notas |
 |---|---|---|
 | `POST /api/fuel/ingest` | `src/app/api/fuel/ingest/route.ts` | Bearer `FUEL_INGEST_TOKEN` si está seteado. Payload validado con **zod** (`ingestSchema`). Upsert vehicle, createMany readings, alerts con `atIndex`. |
-| `GET /api/fuel/status` | `src/app/api/fuel/status/route.ts` | **Nuevo**: último estado para el frontend. `?label=&take=` → `{vehicle, reading, readings, alerts}`. |
+| `GET /api/fuel/status` | `src/app/api/fuel/status/route.ts` | último estado para el frontend. `?label=&take=` → `{vehicle, reading, readings, alerts}`. |
+| `GET /api/fuel/physics` | `src/app/api/fuel/physics/route.ts` | **Nuevo**: telemetria numerica completa (`PhysicsSnapshot`). `?label=&history=` (clamp 1-120, default 30). 404 sin vehiculo/lecturas; 200 con `physics:null` si aun no hay telemetria. `Cache-Control: no-store`. Ver `PHYSICS_CONTRACT.md`. |
 | `GET /api/fuel/ingest` | idem ingest | health `{status:"ok"}` |
 | `GET/POST /api/detect` | `src/app/api/detect/route.ts` | corre `runFuelDetection` (detección del equipo sobre readings). |
 | tRPC `fuel.getLatestReadings` | `src/server/api/routers/fuel.ts` | `{vehicleId?, take?}` |
 | tRPC `fuel.getAlerts` | idem | `{vehicleId?, take?}` |
 | tRPC `fuel.getVehicle` | idem | `{label}` — usa `findFirst` (label unique ahora). |
+| tRPC `fuel.getLatestPhysics` | idem | **Nuevo**: `{label?, history?}` — mismo helper que `GET /api/fuel/physics` (`src/server/fuel-physics.ts`). |
 | tRPC `vehicle.detect` | `vehicle.ts` | botón UI existente. |
 
 Registrado en `src/server/api/root.ts` → `fuel: fuelRouter`.
