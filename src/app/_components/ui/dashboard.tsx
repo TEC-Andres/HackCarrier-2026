@@ -15,9 +15,9 @@ import {
   TriangleAlert,
   Waves,
 } from "lucide-react";
-import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
+import { Badge } from "~/app/_components/ui/badge";
+import { Button } from "~/app/_components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "~/app/_components/ui/card";
 import { cn } from "~/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -57,9 +57,9 @@ type Severity = "critical" | "warning" | "info";
 type AlertItem = { severity: Severity; title: string; detail: string };
 
 const severityStyles: Record<Severity, string> = {
-  critical: "border-l-red-500 bg-red-500/5",
-  warning: "border-l-amber-400 bg-amber-400/5",
-  info: "border-l-cyan-400 bg-cyan-400/5",
+  critical: "border-l-red-500 bg-red-50",
+  warning: "border-l-amber-500 bg-amber-50",
+  info: "border-l-sky-500 bg-sky-50",
 };
 
 function buildAlerts(d: SimResponse | null): AlertItem[] {
@@ -203,7 +203,7 @@ export default function Dashboard() {
   return (
     <div className="flex min-h-screen">
       {/* Barra lateral de iconos */}
-      <aside className="hidden w-14 flex-col items-center gap-5 border-r bg-card/60 py-4 sm:flex">
+      <aside className="hidden w-14 flex-col items-center gap-5 border-r border-border bg-card py-4 sm:flex">
         <Waves className="h-6 w-6 text-primary" />
         <div className="mt-2 flex flex-col gap-4 text-muted-foreground">
           <LayoutDashboard className="h-5 w-5 text-primary" />
@@ -221,7 +221,7 @@ export default function Dashboard() {
               TANK-SIM <span className="text-primary">{"//"}</span> Control de nivel
             </h1>
             <p className="text-xs text-muted-foreground">
-              RK4 stateless · Python serverless · polling {POLL_MS} ms
+              RK4 stateless · Next route · polling {POLL_MS} ms
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -243,11 +243,11 @@ export default function Dashboard() {
         </header>
 
         {error && (
-          <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
+          <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-50 p-3 text-sm text-red-700">
             <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
-              No se pudo contactar con <code className="font-mono">/api/simulate</code>: {error}. Si estás en local,
-              ejecuta <code className="font-mono">vercel dev</code> (no solo <code className="font-mono">next dev</code>).
+              No se pudo contactar con <code className="font-mono">/api/simulate</code>: {error}.
+              Verifica que la ruta esté desplegada.
             </div>
           </div>
         )}
@@ -266,7 +266,7 @@ export default function Dashboard() {
                 <div
                   className={cn(
                     "h-full rounded-full transition-all duration-500",
-                    levelPct > 85 ? "bg-red-500" : levelPct < 15 ? "bg-amber-400" : "bg-cyan-400"
+                    levelPct > 85 ? "bg-red-500" : levelPct < 15 ? "bg-amber-500" : "bg-primary"
                   )}
                   style={{ width: `${levelPct}%` }}
                 />
@@ -291,7 +291,7 @@ export default function Dashboard() {
               <CardTitle>Q entrada</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="font-mono text-3xl font-semibold text-emerald-400">
+              <div className="font-mono text-3xl font-semibold text-emerald-600">
                 {(data?.sensors.q_in_lps ?? 0).toFixed(1)}{" "}
                 <span className="text-base text-muted-foreground">L/s</span>
               </div>
@@ -304,7 +304,7 @@ export default function Dashboard() {
               <CardTitle>Q salida total</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="font-mono text-3xl font-semibold text-amber-400">
+              <div className="font-mono text-3xl font-semibold text-amber-600">
                 {((data?.sensors.q_valve_lps ?? 0) + (data?.sensors.q_porous_lps ?? 0)).toFixed(2)}{" "}
                 <span className="text-base text-muted-foreground">L/s</span>
               </div>
@@ -321,14 +321,14 @@ export default function Dashboard() {
           <Card className="lg:col-span-2">
             <CardHeader className="flex-row items-center justify-between space-y-0">
               <CardTitle>Nivel h(t) · Matplotlib</CardTitle>
-              <Badge variant="outline">PNG base64</Badge>
+              <Badge variant="outline">SVG chart</Badge>
             </CardHeader>
             <CardContent>
               {data ? (
                 <img
-                  src={`data:image/png;base64,${data.image}`}
-                  alt="Gráfico del nivel del tanque generado con Matplotlib"
-                  className="w-full rounded-md border border-border"
+                  src={`data:image/svg+xml;base64,${data.image}`}
+                  alt="Gráfico del nivel del tanque h(t)"
+                  className="w-full rounded-md border border-border bg-white"
                 />
               ) : (
                 <div className="flex aspect-[7.2/3.4] w-full items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
@@ -346,7 +346,7 @@ export default function Dashboard() {
               <CardContent className="space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Gauge className={cn("h-5 w-5", valveOpen ? "text-emerald-400" : "text-amber-400")} />
+                    <Gauge className={cn("h-5 w-5", valveOpen ? "text-emerald-600" : "text-amber-600")} />
                     <span className="font-mono text-lg">{valveOpen ? "ABIERTA" : "CERRADA"}</span>
                   </div>
                   <Badge variant={valveOpen ? "success" : "warning"}>{valveOpen ? "Drenando" : "Bloqueada"}</Badge>
@@ -393,13 +393,13 @@ export default function Dashboard() {
               <Card key={tube.id}>
                 <CardHeader className="flex-row items-center justify-between space-y-0">
                   <CardTitle className="flex items-center gap-2">
-                    <Droplets className="h-4 w-4 text-violet-400" />
+                    <Droplets className="h-4 w-4 text-violet-600" />
                     Tubo poroso {tube.id}
                   </CardTitle>
                   <Badge variant={active ? "default" : "outline"}>{active ? "Activo" : "Seco"}</Badge>
                 </CardHeader>
                 <CardContent>
-                  <div className="font-mono text-3xl font-semibold text-violet-300">
+                  <div className="font-mono text-3xl font-semibold text-violet-700">
                     {tube.flow_lps.toFixed(2)} <span className="text-base text-muted-foreground">L/s</span>
                   </div>
                   <div className="mt-2 flex justify-between text-xs text-muted-foreground">
@@ -408,7 +408,7 @@ export default function Dashboard() {
                   </div>
                   <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-secondary">
                     <div
-                      className="h-full rounded-full bg-violet-400 transition-all duration-500"
+                      className="h-full rounded-full bg-violet-500 transition-all duration-500"
                       style={{ width: `${tube.saturation * 100}%` }}
                     />
                   </div>

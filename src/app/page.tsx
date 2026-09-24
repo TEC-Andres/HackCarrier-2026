@@ -1,75 +1,97 @@
-import Dashboard from "~/components/dashboard";
+import Link from "next/link";
+import { BarChart3, Map, FlaskConical } from "lucide-react";
 
-import { DetectButton } from "~/app/_components/detect-button";
-import { HelloButton } from "~/app/_components/hello-button";
-import { LatestPost } from "~/app/_components/post";
-import { auth } from "~/server/auth";
-import { api, HydrateClient } from "~/trpc/server";
+const modules = [
+  {
+    href: "/simulation",
+    title: "Simulation",
+    description: "Tank-level control model with live sensor polling and valve state.",
+    icon: FlaskConical,
+  },
+  {
+    href: "/clientVisualization",
+    title: "Client Visualization",
+    description: "Fleet and asset views for operators managing connected refrigeration units.",
+    icon: BarChart3,
+  },
+  {
+    href: "/mapDashboard",
+    title: "Map Dashboard",
+    description: "Geospatial asset tracking, geo-fences, and route-level operational alerts.",
+    icon: Map,
+  },
+] as const;
 
-export default async function Home() {
-  const hello = await api.post.hello({ text: "from tRPC" });
-  const session = await auth();
-
-  if (session?.user) {
-    void api.post.getLatest.prefetch();
-  }
-
+export default function Home() {
   return (
-    <HydrateClient>
-      <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-b from-[#2e026d] to-[#15162c] text-white">
-        <div className="container flex flex-col items-center justify-center gap-12 px-4 py-16">
-          <h1 className="text-5xl font-extrabold tracking-tight sm:text-[5rem]">
-            Create <span className="text-[hsl(280,100%,70%)]">T3</span> App
-          </h1>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:gap-8">
-            <Link
-              className="flex max-w-xs flex-col gap-4 rounded-xl bg-white/10 p-4 hover:bg-white/20"
-              href="https://create.t3.gg/en/usage/first-steps"
-              target="_blank"
-            >
-              <h3 className="text-2xl font-bold">First Steps →</h3>
-              <div className="text-lg">
-                Just the basics - Everything you need to know to set up your
-                database and authentication.
-              </div>
-            </Link>
-            <Link
-              className="flex max-w-xs flex-col gap-4 rounded-xl bg-white/10 p-4 hover:bg-white/20"
-              href="https://create.t3.gg/en/introduction"
-              target="_blank"
-            >
-              <h3 className="text-2xl font-bold">Documentation →</h3>
-              <div className="text-lg">
-                Learn more about Create T3 App, the libraries it uses, and how
-                to deploy it.
-              </div>
-            </Link>
-          </div>
-          <div className="flex flex-col items-center gap-2">
-            <p className="text-2xl text-white">
-              {hello ? hello.greeting : "Loading tRPC query..."}
-            </p>
-
-            <HelloButton />
-
-            <DetectButton />
-
-            <div className="flex flex-col items-center justify-center gap-4">
-              <p className="text-center text-2xl text-white">
-                {session && <span>Logged in as {session.user?.name}</span>}
-              </p>
-              <Link
-                href={session ? "/api/auth/signout" : "/api/auth/signin"}
-                className="rounded-full bg-white/10 px-10 py-3 font-semibold no-underline transition hover:bg-white/20"
-              >
-                {session ? "Sign out" : "Sign in"}
-              </Link>
+    <div className="min-h-screen bg-background">
+      <header className="border-b border-border bg-card">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
+          <div className="flex items-center gap-3">
+            <span className="flex h-8 w-8 items-center justify-center rounded bg-primary text-xs font-bold text-primary-foreground">
+              LF
+            </span>
+            <div className="leading-tight">
+              <p className="text-sm font-semibold tracking-tight text-foreground">LYNX Fleet</p>
+              <p className="text-[11px] text-muted-foreground">by Carrier · HackCarrier 2026</p>
             </div>
           </div>
-
-          {session?.user && <LatestPost />}
+          <nav aria-label="Primary" className="hidden items-center gap-6 text-sm text-muted-foreground sm:flex">
+            <Link href="/simulation" className="transition-colors hover:text-foreground">
+              Simulation
+            </Link>
+            <Link href="/clientVisualization" className="transition-colors hover:text-foreground">
+              Clients
+            </Link>
+            <Link href="/mapDashboard" className="transition-colors hover:text-foreground">
+              Map
+            </Link>
+          </nav>
         </div>
+      </header>
+
+      <main className="mx-auto max-w-6xl px-4 py-12 md:py-16">
+        <section className="max-w-2xl">
+          <p className="text-xs font-semibold uppercase tracking-widest text-accent">
+            Connected cold chain
+          </p>
+          <h1 className="mt-3 text-3xl font-bold tracking-tight text-foreground md:text-4xl">
+            Fleet intelligence for refrigerated operations
+          </h1>
+          <p className="mt-4 text-base leading-relaxed text-muted-foreground">
+            Monitor connected refrigeration systems, surface fuel and equipment anomalies, and give
+            operators at-a-glance visibility across the fleet — in one place.
+          </p>
+        </section>
+
+        <section aria-label="Modules" className="mt-10 grid gap-4 md:grid-cols-3">
+          {modules.map(({ href, title, description, icon: Icon }) => (
+            <Link
+              key={href}
+              href={href}
+              className="group rounded-lg border border-border bg-card p-5 shadow-sm transition-all hover:border-accent/40 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Icon aria-hidden="true" className="h-5 w-5" />
+              </div>
+              <h2 className="mt-4 text-base font-semibold text-foreground group-hover:text-primary">
+                {title}
+              </h2>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{description}</p>
+              <span className="mt-4 inline-block text-sm font-medium text-accent">
+                Open module →
+              </span>
+            </Link>
+          ))}
+        </section>
       </main>
-    </HydrateClient>
+
+      <footer className="border-t border-border bg-card">
+        <div className="mx-auto flex max-w-6xl flex-col gap-1 px-4 py-6 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <p>© 2026 Carrier · LYNX Fleet reference UI</p>
+          <p>HackCarrier 2026</p>
+        </div>
+      </footer>
+    </div>
   );
 }
