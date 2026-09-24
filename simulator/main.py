@@ -1,11 +1,11 @@
 """Robust Fuel Monitor - Reto 04 (Carrier x Tec de Monterrey).
 
-Entry point: opens the animated tank view (Parte 1).
-The full detection pipeline (virtual edge -> filter -> CUSUM) lands in
-later parts; dashboard is a separate handoff.
+Entry point: 3D visualization of the tank (plotly) with the multimodal
+slosh surface, ring baffles and the 3 porous tubes in a triangle at the
+tank extremes, each with its ultrasonic sensor.
 """
 
-from tank_visual import run
+from visual3d import main
 
 if __name__ == "__main__":
-    run()
+    main()

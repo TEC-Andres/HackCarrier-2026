@@ -1,145 +1,177 @@
-"""Cylindrical-tank fuel model: reduced-order sloshing (NASA SP-106) + RK4.
+"""Cylindrical-tank fuel model: 3D multimodal sloshing (NASA SP-106) + RK4.
 
-Reduced-order model of the Navier-Stokes free-surface problem. First
-antisymmetric slosh mode of a circular cylinder, per Abramson, "The Dynamic
-Behavior of Liquids in Moving Containers", NASA SP-106 (1966) and the Dodge
-(2000) update:
+Reduced-order model of the Navier-Stokes free-surface problem. The free
+surface is a superposition of the first two antisymmetric (m = 1) slosh
+modes of the circular cylinder, each resolved in TWO azimuthal
+orientations (cos-theta / sin-theta), so the surface is a true 3D shape:
 
-    omega1^2 = (1.841*g/R) * tanh(1.841*h/R)          k1*R = 1.841 (J1' root)
-    m_s      = m_liq * 2*R*tanh(1.841*h/R) / (h*1.841*(1.841**2 - 1))
+    eta(r, theta, t) = sum_n J1(k_n r) * (x_n(t) cos theta + y_n(t) sin theta)
 
-Equivalent mechanical model (spring-mass-damper; exact linear equivalence
-with the pendulum analog, see "Equivalent Mechanical Models for Sloshing"):
+Mode constants (first two roots of J1'(x) = 0):
+    k_1 R = 1.841,  k_2 R = 5.331
+    omega_n^2 = (g k_n) tanh(k_n h)
+    m_n / m_liq = 2 tanh(k_n h) / (h k_n ((k_n R)^2 - 1))      [Abramson, SP-106]
 
-    m_s*x'' + c_s*x' + k_s*x = -m_s*a(t)
-    k_s = m_s*omega1^2     c_s = 2*zeta*m_s*omega1
-    =>  x'' = -omega1^2*x - 2*zeta*omega1*x' - a(t)
+Each mode is a spring-mass-damper forced by the lateral acceleration
+component along its azimuthal orientation:
 
-Level ODE (mass balance):  dh/dt = (q_in - q_motor - q_leak - q_theft)/A
+    x'' = -omega^2 x - 2 zeta omega x' - a(t)
 
-Drains (Navier-Stokes in pipes, closed form):
-    Poiseuille   q = pi*r^4*rho*g*h/(8*mu*L)   (siphon/hose theft)
-    Torricelli   q = Cd*Ao*sqrt(2*g*h)         (authorized drain valve)
+Damping per mode = free surface + ring baffles (scaled by mode) + a
+viscous boundary-layer term (Stokes layer), so the fluid viscosity mu
+changes the slosh decay in the time domain:
 
-Porous sensor tubes: first-order stilling wells (low-pass mechanical filter)
-    dh_tube/dt = (h - h_tube)/tau
+    zeta_visc = c_stokes sqrt(mu / (rho omega)) (1/R + 1/h)
 
-Integration: classic RK4. Sensor cadence: 10 Hz.
+Level ODE: dh/dt = (q_in - q_motor - q_leak - q_theft)/A
+Drains:   Poiseuille q = pi r^4 rho g h / (8 mu L)   (siphon, scales 1/mu)
+          Torricelli q = Cd Ao sqrt(2 g h)           (authorized valve)
+Porous tubes (stilling wells) track the LOCAL surface height at their
+(r, theta) position: dh_tube/dt = (h + eta(r_i, theta_i) - h_tube)/tau,
+with tau scaled by viscosity (tau = tau0 * mu / mu_ref).
+
+Integration: classic RK4.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 G = 9.81
-K1_R = 1.841  # first root of J1'(x) = 0 (fundamental antisymmetric mode)
+K_ROOTS = (1.841, 5.331)   # first two roots of J1'(x) = 0 (m = 1 modes)
+PI = np.pi
+
+
+def bessel_j1(x: float) -> float:
+    """J1(x) via Abramowitz & Stegun polynomial approximations (~1e-7)."""
+    x = float(x)
+    if x < 0.0:
+        return -bessel_j1(-x)
+    if x <= 3.0:
+        t = x / 3.0
+        t2 = t * t
+        poly = (0.5 - 0.56249985 * t2 + 0.21093573 * t2**2 - 0.03954289 * t2**3
+                + 0.00443319 * t2**4 - 0.00031761 * t2**5 + 0.00001109 * t2**6)
+        return x * poly
+    t = 3.0 / x
+    t2 = t * t
+    f1 = (0.79788456 + 0.00000156 * t + 0.01659667 * t2 + 0.00017105 * t2 * t
+          - 0.00249511 * t2**2 + 0.00113653 * t2**2 * t - 0.00020033 * t2**3)
+    theta1 = (x - 2.35619449 + 0.12499612 * t + 0.00005650 * t2
+              - 0.00637879 * t2 * t + 0.00074348 * t2**2 + 0.00079824 * t2**2 * t
+              - 0.00029166 * t2**3)
+    return f1 * np.cos(theta1) / np.sqrt(x)
 
 
 @dataclass
 class TankConfig:
     """Geometry and fluid properties. All SI units unless noted."""
 
-    radius: float = 0.15        # tank radius (m)
-    height: float = 0.45        # tank height (m)
-    rho: float = 1000.0         # fluid density (kg/m3) - water demo
-    mu: float = 1.0e-3          # dynamic viscosity (Pa.s)
-    motor_gph: float = 0.7      # engine consumption (US gal/h)
-    speedup: float = 20.0       # demo time compression (1 = physical)
-    hose_radius: float = 0.004  # thief siphon hose radius (m)
-    hose_length: float = 2.0    # siphon hose length (m)
-    valve_area: float = 5e-5    # authorized drain orifice area (m2)
-    valve_cd: float = 0.62      # discharge coefficient
-    zeta_fluid: float = 0.015   # free-surface damping, smooth tank
-    zeta_baffle: float = 0.25   # added damping from ring baffles
-    tube_tau: float = 1.5       # porous-tube time constant (s)
-    dt: float = 0.02            # integration step (s)
+    radius: float = 0.15
+    height: float = 0.45
+    rho: float = 1000.0        # fluid density (kg/m3)
+    mu: float = 1.0e-3         # dynamic viscosity (Pa.s)
+    mu_ref: float = 1.0e-3     # reference viscosity for tube lag scaling
+    motor_gph: float = 0.7     # engine consumption (US gal/h)
+    speedup: float = 20.0      # demo time compression (1 = physical)
+    hose_radius: float = 0.004
+    hose_length: float = 2.0
+    valve_area: float = 5e-5
+    valve_cd: float = 0.62
+    zeta_fluid: float = 0.015
+    zeta_baffle: float = 0.25  # base baffle damping (mode 0); mode n: *(1 + 2n)
+    c_stokes: float = 2.0      # viscous boundary-layer damping coefficient
+    tube_tau: float = 1.5      # porous-tube time constant at mu_ref (s)
+    # 3 porous tubes at the tank extremes (0.8R), equilateral triangle;
+    # each tube carries its own HC-SR04 sensor on top.
+    tube_positions: tuple = ((0.8, 0.0), (0.8, 2.0944), (0.8, 4.1888))
+    dt: float = 0.02
 
     @property
     def area(self) -> float:
-        return np.pi * self.radius**2
+        return PI * self.radius**2
 
     @classmethod
     def demo(cls) -> "TankConfig":
-        """Water-filled demo container (visible slosh + accelerated clock)."""
         return cls()
 
     @classmethod
     def carrier(cls) -> "TankConfig":
         """Carrier reefer remote tank: 22 in diameter, 18 in tall, diesel."""
         return cls(
-            radius=0.2794,
-            height=0.4572,
-            rho=832.0,
-            mu=2.5e-3,
-            motor_gph=0.7,
-            speedup=1.0,
+            radius=0.2794, height=0.4572, rho=832.0, mu=2.5e-3,
+            mu_ref=2.5e-3, motor_gph=0.7, speedup=1.0,
         )
 
 
-def slosh_freq(cfg: TankConfig, h: float) -> float:
-    """omega1 (rad/s) of the first antisymmetric mode (cylindrical tank)."""
-    hh = max(h, 1e-4)
-    return float(np.sqrt((K1_R * G / cfg.radius) * np.tanh(K1_R * hh / cfg.radius)))
+def kn(cfg: TankConfig, n: int) -> float:
+    return K_ROOTS[n] / cfg.radius
 
 
-def slosh_mass(cfg: TankConfig, h: float) -> float:
-    """Equivalent slosh mass m_s (kg) for the first mode (NASA SP-106)."""
+def slosh_freq(cfg: TankConfig, h: float, n: int = 0) -> float:
+    """omega_n (rad/s) of antisymmetric mode n (cylindrical tank)."""
     hh = max(h, 1e-4)
+    k = kn(cfg, n)
+    return float(np.sqrt(G * k * np.tanh(k * hh)))
+
+
+def slosh_mass(cfg: TankConfig, h: float, n: int = 0) -> float:
+    """Equivalent slosh mass m_n (kg), m = 1 modes (NASA SP-106)."""
+    hh = max(h, 1e-4)
+    k = kn(cfg, n)
     m_liq = cfg.rho * cfg.area * hh
-    num = 2.0 * cfg.radius * np.tanh(K1_R * hh / cfg.radius)
-    den = hh * K1_R * (K1_R**2 - 1.0)
-    return float(m_liq * num / den)
+    return float(m_liq * 2.0 * np.tanh(k * hh) / (hh * k * ((k * cfg.radius)**2 - 1.0)))
 
 
 def poiseuille_flow(cfg: TankConfig, h: float) -> float:
-    """Siphon flow (m3/s) through a hose: q = pi*r^4*rho*g*h/(8*mu*L)."""
+    """Siphon flow (m3/s) through a hose: q = pi r^4 rho g h / (8 mu L)."""
     hh = max(h, 0.0)
-    return float(np.pi * cfg.hose_radius**4 * cfg.rho * G * hh
+    return float(PI * cfg.hose_radius**4 * cfg.rho * G * hh
                  / (8.0 * cfg.mu * cfg.hose_length))
 
 
 def torricelli_flow(cfg: TankConfig, h: float) -> float:
-    """Authorized drain flow (m3/s): q = Cd*Ao*sqrt(2*g*h)."""
+    """Authorized drain flow (m3/s): q = Cd Ao sqrt(2 g h)."""
     hh = max(h, 0.0)
     return float(cfg.valve_cd * cfg.valve_area * np.sqrt(2.0 * G * hh))
 
 
 class RoadProfile:
-    """Lateral acceleration a(t) felt by the tank (m/s2)."""
+    """3D lateral acceleration (a_x, a_y) felt by the tank (m/s2)."""
 
     def __init__(self, seed: int = 0):
         self.rng = np.random.default_rng(seed)
         self.smooth = False
-        self.a_ou = 0.0
+        self.a_x_ou = 0.0
+        self.a_y_ou = 0.0
         self.bumps: list[tuple[float, float, float, float]] = []
-        self.corner: tuple[float, float, float, float] | None = None
+        self.corners: list[tuple[float, float, float, float]] = []
 
     def step(self, dt: float, t: float) -> None:
         if self.smooth:
-            self.a_ou += (-self.a_ou / 0.8) * dt + 0.25 * np.sqrt(dt) * self.rng.standard_normal()
+            self.a_x_ou += (-self.a_x_ou / 0.8) * dt + 0.25 * np.sqrt(dt) * self.rng.standard_normal()
+            self.a_y_ou += (-self.a_y_ou / 1.5) * dt + 0.15 * np.sqrt(dt) * self.rng.standard_normal()
 
-    def kick_bump(self, t: float, amp: float = 6.0, tau: float = 0.8, freq: float = 1.7) -> None:
+    def kick_bump(self, t: float, amp: float = 3.0, tau: float = 0.8, freq: float = 1.7) -> None:
         self.bumps.append((t, amp, tau, freq))
 
-    def kick_corner(self, t: float, amp: float = 1.5, freq: float = 0.15, duration: float = 6.0) -> None:
-        self.corner = (t, amp, freq, duration)
+    def kick_corner(self, t: float, amp: float = 2.5, freq: float = 0.12, duration: float = 6.0) -> None:
+        self.corners.append((t, amp, freq, duration))
 
-    def value(self, t: float) -> float:
-        a = 0.0
-        if self.smooth:
-            a += self.a_ou
+    def value(self, t: float) -> tuple[float, float]:
+        ax = self.a_x_ou if self.smooth else 0.0
+        ay = self.a_y_ou if self.smooth else 0.0
         for t0, amp, tau, freq in self.bumps:
             dt = t - t0
             if 0.0 <= dt <= 6.0 * tau:
-                a += amp * np.exp(-dt / tau) * np.sin(2.0 * np.pi * freq * dt)
-        if self.corner is not None:
-            t0, amp, freq, dur = self.corner
+                ax += amp * np.exp(-dt / tau) * np.sin(2.0 * PI * freq * dt)
+        for t0, amp, freq, dur in self.corners:
             dt = t - t0
             if 0.0 <= dt <= dur:
-                a += amp * np.sin(2.0 * np.pi * freq * dt) * (1.0 - np.exp(-dt / 0.5))
-        return float(a)
+                ay += amp * np.sin(2.0 * PI * freq * dt) * (1.0 - np.exp(-dt / 0.5))
+        return float(ax), float(ay)
 
 
 @dataclass
@@ -153,19 +185,23 @@ class Flows:
 
 
 class FuelTank:
-    """Cylindrical tank + 3 porous sensor tubes, integrated with RK4."""
+    """3D cylindrical tank (multimodal slosh) + 3 porous sensor tubes, RK4."""
+
+    N_MODES = len(K_ROOTS)
 
     def __init__(self, cfg: TankConfig | None = None, h0: float | None = None):
         self.cfg = cfg or TankConfig.demo()
         self.h0 = 0.75 * self.cfg.height if h0 is None else h0
         self.t = 0.0
-        self.state = np.zeros(6)
+        n_states = 1 + 4 * self.N_MODES + 3
+        self.state = np.zeros(n_states)
         self.state[0] = self.h0
-        self.state[3:6] = self.h0
+        self.state[-3:] = self.h0
         self.baffles = True
         self.flows = Flows()
         self.motor_q = self.cfg.motor_gph * 3.785411784e-3 / 3600.0 * self.cfg.speedup
 
+    # -- state accessors -------------------------------------------------
     @property
     def h(self) -> float:
         return float(self.state[0])
@@ -174,92 +210,119 @@ class FuelTank:
     def slosh_x(self) -> float:
         return float(self.state[1])
 
-    @property
-    def slosh_v(self) -> float:
-        return float(self.state[2])
+    def mode_state(self, n: int) -> tuple[float, float, float, float]:
+        i = 1 + 4 * n
+        return tuple(float(v) for v in self.state[i:i + 4])
 
     def tube_levels(self) -> np.ndarray:
-        return self.state[3:6].copy()
-
-    def zeta(self) -> float:
-        return self.cfg.zeta_fluid + (self.cfg.zeta_baffle if self.baffles else 0.0)
-
-    def eta_wall(self) -> float:
-        """Free-surface displacement amplitude at the wall (visual scale)."""
-        h = max(self.h, 1e-4)
-        gain = (h * K1_R * (K1_R**2 - 1.0)) / (2.0 * self.cfg.radius
-                                               * np.tanh(K1_R * h / self.cfg.radius))
-        return float(self.slosh_x * gain / K1_R)
-
-    def _rhs(self, state: np.ndarray, t: float, a: float) -> np.ndarray:
-        h = float(np.clip(state[0], 0.0, self.cfg.height))
-        omega2 = slosh_freq(self.cfg, h) ** 2
-        zeta = self.zeta()
-        q_net = (self.flows.q_in - self.motor_q - self.flows.q_leak
-                 - self.flows.q_theft)
-        d = np.zeros(6)
-        d[0] = q_net / self.cfg.area
-        d[1] = state[2]
-        d[2] = -omega2 * state[1] - 2.0 * zeta * np.sqrt(omega2) * state[2] - a
-        d[3:6] = (h - state[3:6]) / self.cfg.tube_tau
-        return d
-
-    def step(self, a: float, dt: float | None = None) -> None:
-        """Advance one RK4 step with lateral acceleration a (m/s2)."""
-        h_dt = dt or self.cfg.dt
-        s = self.state
-        k1 = self._rhs(s, self.t, a)
-        k2 = self._rhs(s + 0.5 * h_dt * k1, self.t + 0.5 * h_dt, a)
-        k3 = self._rhs(s + 0.5 * h_dt * k2, self.t + 0.5 * h_dt, a)
-        k4 = self._rhs(s + h_dt * k3, self.t + h_dt, a)
-        self.state = s + (h_dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-        self.state[0] = float(np.clip(self.state[0], 0.0, self.cfg.height))
-        self.t += h_dt
+        return self.state[-3:].copy()
 
     def volume_l(self) -> float:
         return float(self.cfg.area * self.h * 1000.0)
 
+    # -- physics ----------------------------------------------------------
+    def surface(self, r: float, theta: float) -> float:
+        """Free-surface displacement eta(r, theta) above the mean level."""
+        eta = 0.0
+        for n in range(self.N_MODES):
+            k = kn(self.cfg, n)
+            x, _, y, _ = self.mode_state(n)
+            shape = bessel_j1(k * max(r, 0.0))
+            eta += shape * (x * np.cos(theta) + y * np.sin(theta))
+        return float(eta)
 
-def self_check_sloshing(cfg: TankConfig | None = None) -> dict:
-    """Gate: FFT peak of the simulated slosh vs the analytic cylindrical omega1."""
-    cfg = cfg or TankConfig.demo()
-    tank = FuelTank(cfg)
-    tank.baffles = False
-    h_fix = tank.h0
-    tank.state[0] = h_fix
-    tank.state[1] = 1.0e-3
-    tank.flows.q_in = 0.0
-    tank.motor_q = 0.0
-    dt = cfg.dt
-    xs: list[float] = []
-    for _ in range(int(120.0 / dt)):
-        tank.step(0.0)
-        if tank.t > 20.0:
-            xs.append(tank.slosh_x)
-    x = np.asarray(xs)
-    x = x - x.mean()
+    def zeta(self, n: int) -> float:
+        """Total damping ratio of mode n: surface + baffles + viscous."""
+        hh = max(self.h, 1e-4)
+        omega = slosh_freq(self.cfg, hh, n)
+        baffle = self.cfg.zeta_baffle * (1.0 + 2.0 * n) if self.baffles else 0.0
+        viscous = (self.cfg.c_stokes * np.sqrt(self.cfg.mu / (self.cfg.rho * omega))
+                   * (1.0 / self.cfg.radius + 1.0 / hh))
+        return float(self.cfg.zeta_fluid + baffle + viscous)
+
+    def tube_tau(self) -> float:
+        return self.cfg.tube_tau * (self.cfg.mu / self.cfg.mu_ref)
+
+    def _rhs(self, state: np.ndarray, t: float, ax: float, ay: float) -> np.ndarray:
+        cfg = self.cfg
+        h = float(np.clip(state[0], 0.0, cfg.height))
+        q_net = (self.flows.q_in - self.motor_q - self.flows.q_leak
+                 - self.flows.q_theft)
+        d = np.zeros_like(state)
+        d[0] = q_net / cfg.area
+        for n in range(self.N_MODES):
+            i = 1 + 4 * n
+            omega2 = slosh_freq(cfg, h, n) ** 2
+            zeta = self.zeta(n)
+            damp = 2.0 * zeta * np.sqrt(omega2)
+            d[i] = state[i + 1]
+            d[i + 1] = -omega2 * state[i] - damp * state[i + 1] - ax
+            d[i + 2] = state[i + 3]
+            d[i + 3] = -omega2 * state[i + 2] - damp * state[i + 3] - ay
+        tau = self.tube_tau()
+        for j, (r_frac, theta) in enumerate(cfg.tube_positions):
+            target = h + self.surface_from(state, r_frac * cfg.radius, theta)
+            d[-3 + j] = (target - state[-3 + j]) / tau
+        return d
+
+    def surface_from(self, state: np.ndarray, r: float, theta: float) -> float:
+        """Surface displacement from an arbitrary state vector."""
+        eta = 0.0
+        for n in range(self.N_MODES):
+            k = kn(self.cfg, n)
+            i = 1 + 4 * n
+            shape = bessel_j1(k * max(r, 0.0))
+            eta += shape * (state[i] * np.cos(theta) + state[i + 2] * np.sin(theta))
+        return float(eta)
+
+    def step(self, ax: float, ay: float = 0.0, dt: float | None = None) -> None:
+        """Advance one RK4 step with 3D lateral acceleration (ax, ay)."""
+        h_dt = dt or self.cfg.dt
+        s = self.state
+        k1 = self._rhs(s, self.t, ax, ay)
+        k2 = self._rhs(s + 0.5 * h_dt * k1, self.t + 0.5 * h_dt, ax, ay)
+        k3 = self._rhs(s + 0.5 * h_dt * k2, self.t + 0.5 * h_dt, ax, ay)
+        k4 = self._rhs(s + h_dt * k3, self.t + h_dt, ax, ay)
+        self.state = s + (h_dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        self.state[0] = float(np.clip(self.state[0], 0.0, self.cfg.height))
+        self.t += h_dt
+
+
+def _fft_peak(signal: np.ndarray, dt: float) -> float:
+    x = signal - signal.mean()
     win = np.hanning(len(x))
     spec = np.abs(np.fft.rfft(x * win))
     freqs = np.fft.rfftfreq(len(x), d=dt)
-    peak = float(freqs[np.argmax(spec)])
-    analytic = slosh_freq(cfg, h_fix) / (2.0 * np.pi)
-    err_pct = 100.0 * abs(peak - analytic) / analytic
-    return {
-        "h": h_fix,
-        "f_analytic_hz": analytic,
-        "f_fft_hz": peak,
-        "err_pct": err_pct,
-        "pass": err_pct < 5.0,
-    }
+    return float(freqs[np.argmax(spec)])
+
+
+def self_check_sloshing(cfg: TankConfig | None = None) -> dict:
+    """Gate: FFT peak of each simulated mode vs its analytic cylindrical omega."""
+    cfg = cfg or TankConfig.demo()
+    results = []
+    for n in range(FuelTank.N_MODES):
+        tank = FuelTank(cfg)
+        tank.baffles = False
+        tank.motor_q = 0.0
+        tank.state[1 + 4 * n] = 1.0e-3
+        xs = []
+        for _ in range(int(120.0 / cfg.dt)):
+            tank.step(0.0, 0.0)
+            if tank.t > 20.0:
+                xs.append(tank.state[1 + 4 * n])
+        peak = _fft_peak(np.asarray(xs), cfg.dt)
+        analytic = slosh_freq(cfg, tank.h0, n) / (2.0 * PI)
+        err = 100.0 * abs(peak - analytic) / analytic
+        results.append({"mode": n, "kR": K_ROOTS[n], "f_analytic_hz": analytic,
+                        "f_fft_hz": peak, "err_pct": err, "pass": err < 5.0})
+    return {"modes": results, "pass": all(r["pass"] for r in results)}
 
 
 if __name__ == "__main__":
     report = self_check_sloshing()
     status = "PASS" if report["pass"] else "FAIL"
-    print(f"Slosh self-check: {status}")
-    print(f"  h          = {report['h']*1000:.0f} mm")
-    print(f"  f analytic = {report['f_analytic_hz']:.3f} Hz")
-    print(f"  f FFT      = {report['f_fft_hz']:.3f} Hz")
-    print(f"  error      = {report['err_pct']:.2f} % (tolerance 5 %)")
-    print(f"  (k1*R = {K1_R}, cylindrical first mode, NASA SP-106)")
+    print(f"Slosh self-check (multimodal 3D): {status}")
+    for r in report["modes"]:
+        print(f"  modo {r['mode']} (kR={r['kR']}): analytic {r['f_analytic_hz']:.3f} Hz | "
+              f"FFT {r['f_fft_hz']:.3f} Hz | error {r['err_pct']:.2f} %")
     raise SystemExit(0 if report["pass"] else 1)

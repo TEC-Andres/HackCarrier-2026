@@ -51,6 +51,10 @@ class ScenarioController:
             self.road.smooth = self.moving
         elif kind == "pothole":
             self.road.kick_bump(ev["t"], amp=ev.get("amp", 3.0))
+        elif kind == "corner":
+            self.road.kick_corner(ev["t"], amp=ev.get("amp", 2.5),
+                                  freq=ev.get("freq", 0.12),
+                                  duration=ev.get("duration", 6.0))
         elif kind == "leak_start":
             self.leak_on = True
             self.tank.flows.q_leak = ev.get("rate_lpm", 0.1) * LPM
@@ -105,7 +109,8 @@ def demo_script(controller: ScenarioController, t0: float = 10.0) -> None:
     controller.schedule([
         (t0 + 5, "moving", {"on": True}),
         (t0 + 60, "pothole", {"amp": 3.0}),
-        (t0 + 120, "pothole", {"amp": 3.0}),
+        (t0 + 100, "corner", {"amp": 2.5, "duration": 5.0}),
+        (t0 + 140, "pothole", {"amp": 3.0}),
         (t0 + 180, "moving", {"on": False}),
         (t0 + 200, "refill_start", {"duration": 60.0}),
         (t0 + 280, "moving", {"on": True}),

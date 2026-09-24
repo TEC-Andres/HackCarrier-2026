@@ -1,4 +1,4 @@
-"""Pipeline: physics -> virtual edge -> filter -> CUSUM classifier.
+"""Pipeline: physics (3D) -> virtual edge -> filter -> CUSUM classifier.
 
 Single process, threads per stage, named queues acting as the topic bus.
 The queue names mirror the MQTT topics a production ESP32 would publish
@@ -6,16 +6,22 @@ on (fuel/raw, fuel/filtered, fuel/event...), so swapping the digital twin
 for real hardware only touches the simulation thread.
 
 Stages:
-    [SimThread]      tank physics (RK4) + scenario controller + virtual edge
+    [SimThread]      tank physics (RK4, 3D multimodal) + scenario controller
+                     + virtual edge
                      -> 'fuel/raw'      (10 Hz sensor frames + context)
                      -> 'tank/state'    (true level/slosh for metrics & viz)
     [AnalysisThread] stability-gate EMA filter + consumption model + CUSUM
                      -> 'fuel/filtered' (filtered + expected + rate)
                      -> 'fuel/event'    (classified events + explanation)
+
+Real-time pacing: pass rt (e.g. rt=1 for wall-clock) to make the sim
+produce data at the same rate a real vehicle would; rt=None runs
+flat-out (validation).
 """
 
 from __future__ import annotations
 
+import argparse
 import queue
 import threading
 import time
@@ -24,6 +30,8 @@ from cusum import Event, RobustFuelMonitor
 from scenarios import ScenarioController
 from tank_model import FuelTank, RoadProfile, TankConfig
 from virtual_edge import VirtualEdge
+
+SENTINEL = None
 
 
 class Bus:
@@ -57,7 +65,8 @@ class Bus:
 
 class SimThread(threading.Thread):
     def __init__(self, bus: Bus, cfg: TankConfig, controller: ScenarioController,
-                 edge: VirtualEdge, road: RoadProfile, duration: float, seed: int):
+                 edge: VirtualEdge, road: RoadProfile, duration: float, seed: int,
+                 rt: float | None = None):
         super().__init__(daemon=True)
         self.bus = bus
         self.cfg = cfg
@@ -66,14 +75,17 @@ class SimThread(threading.Thread):
         self.road = road
         self.duration = duration
         self.seed = seed
+        self.rt = rt
+        self.done = threading.Event()
 
     def run(self) -> None:
         tank = self.controller.tank
+        wall_t0 = time.time()
         while tank.t < self.duration:
             self.road.step(self.cfg.dt, tank.t)
-            a = self.road.value(tank.t)
+            ax, ay = self.road.value(tank.t)
             self.controller.advance(tank.t)
-            tank.step(a)
+            tank.step(ax, ay)
             frame = self.edge.sample()
             if frame is not None:
                 frame["ctx"] = self.controller.context()
@@ -83,8 +95,15 @@ class SimThread(threading.Thread):
                     "t": float(tank.t),
                     "h_true": float(tank.h),
                     "slosh_x": float(tank.slosh_x),
-                    "accel": float(a),
+                    "accel": float((ax * ax + ay * ay) ** 0.5),
                 })
+            if self.rt is not None:
+                target = time.time() - wall_t0
+                desired = tank.t / self.rt
+                delay = desired - target
+                if delay > 0:
+                    time.sleep(min(delay, 0.1))
+        self.done.set()
 
 
 class AnalysisThread(threading.Thread):
@@ -96,9 +115,9 @@ class AnalysisThread(threading.Thread):
     def run(self) -> None:
         while True:
             frame = self.bus.get("fuel/raw", timeout=1.0)
+            if frame is SENTINEL:
+                break
             if frame is None:
-                if getattr(self, "_sim_done", False):
-                    break
                 continue
             ctx = frame.get("ctx", {})
             ev = self.monitor.update(
@@ -136,7 +155,7 @@ class PipelineResult:
 
 def run_pipeline(build_script, duration: float, cfg: TankConfig | None = None,
                  dt: float = 0.05, seed: int = 0, h0: float | None = None,
-                 baffles: bool = True) -> PipelineResult:
+                 baffles: bool = True, rt: float | None = None) -> PipelineResult:
     """Run one simulation end-to-end and collect every published frame."""
     cfg = cfg or TankConfig.demo()
     cfg.dt = dt
@@ -148,14 +167,14 @@ def run_pipeline(build_script, duration: float, cfg: TankConfig | None = None,
     build_script(controller)
 
     bus = Bus(["fuel/raw", "fuel/filtered", "fuel/event", "tank/state"])
-    sim = SimThread(bus, cfg, controller, edge, road, duration, seed)
+    sim = SimThread(bus, cfg, controller, edge, road, duration, seed, rt=rt)
     mon = RobustFuelMonitor(cfg)
     ana = AnalysisThread(bus, mon)
     sim.start()
     ana.start()
-    sim.join(timeout=duration / cfg.dt * 0.001 + 30.0)
-    ana._sim_done = True
-    ana.join(timeout=5.0)
+    sim.join()
+    bus.put("fuel/raw", SENTINEL)
+    ana.join()
 
     return PipelineResult(
         events=bus.drain("fuel/event"),
@@ -173,7 +192,26 @@ def print_events(result: PipelineResult) -> None:
         print("sin eventos clasificados")
 
 
-if __name__ == "__main__":
+def main() -> None:
     from scenarios import demo_script
-    res = run_pipeline(demo_script, duration=1280.0)
+
+    parser = argparse.ArgumentParser(description="Pipeline del Robust Fuel Monitor")
+    parser.add_argument("--duration", type=float, default=1280.0)
+    parser.add_argument("--rt", type=float, default=None,
+                        help="factor de tiempo real (1 = reloj real, None = rapido)")
+    parser.add_argument("--baffles", choices=["on", "off"], default="on")
+    parser.add_argument("--mu", type=float, default=None,
+                        help="viscosidad dinamica (Pa.s)")
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
+
+    cfg = TankConfig.demo()
+    if args.mu is not None:
+        cfg.mu = args.mu
+    res = run_pipeline(demo_script, args.duration, cfg=cfg, seed=args.seed,
+                       baffles=args.baffles == "on", rt=args.rt)
     print_events(res)
+
+
+if __name__ == "__main__":
+    main()
