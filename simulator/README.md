@@ -9,12 +9,14 @@ publica eventos en el mismo contrato que consume la aplicación web
 
 ## Fundamentos matemáticos (resumen)
 
-- **Slosh en tanque cilíndrico** — modo 1 antisimétrico (NASA SP-106,
-  Dodge 2000), representado como masa-resorte-amortiguador equivalente
-  e integrado con **Runge-Kutta 4to orden**:
+- **Slosh en tanque cilíndrico** — dos modos antisimétricos (NASA
+  SP-106, Dodge 2000) × orientaciones cos/sin θ, cada uno como
+  masa-resorte-amortiguador equivalente e integrado con **Runge-Kutta
+  4to orden** (dt = 0.02 s por defecto; validate usa 0.05 s):
 
-      omega1^2 = (1.841 g / R) tanh(1.841 h / R)
-      x'' = -omega1^2 x - 2 zeta omega1 x' - a(t)
+      omega_n^2 = (k_n g) tanh(k_n h)
+      x'' = -omega_n^2 x - 2 zeta omega_n x' - a(t)
+      eta(r,θ) = Σ J1(k_n r)(x_n cos θ + y_n sin θ)
 
 - **Caudales** (Navier-Stokes en forma cerrada):
   Poiseuille para el sifón (`q = pi r^4 rho g h / (8 mu L)`) y

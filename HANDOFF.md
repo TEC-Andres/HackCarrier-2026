@@ -46,14 +46,14 @@ Merge de main ya integrado: `6083b32` "Vercel & NEON backend connections (#6)".
 | Archivo | Rol |
 |---|---|
 | `tank_model.py` | Física RK4. Estado `[h, (x,x',y,y')×2 modos, tubo1..3]`. Superficie `eta(r,θ)` con J1 (Abramowitz), modos kR=1.841 y 5.331, damping Stokes `√(μ/(ρω))`, Poiseuille/Torricelli. `self_check_sloshing()` gate FFT. |
-| `visual3d.py` | Escena plotly 3D → `tank3d.html`. Superficie, paredes, anillos baffle, 3 tubos porosos en triángulo equilátero a `0.8R` con sensor HC-SR04 + haz ultrasónico. Flags: `--scenario --baffles --mu --frames --out --no-open`. |
+| `visual3d.py` | Escena plotly 3D → `tank3d.html`. Superficie **vectorizada** (`surface_grid` meshgrid 48×96, `bessel_j1_array`, sin doble loop Python). Sensores: haz ultrasónico anclado en `get_local_height(x,y)` (se mueve con el agua); color de superficie = `surfacecolor=Z` (una sola dimensión física). Flags: `--scenario --baffles --mu --frames --out --no-open`. |
 | `main.py` | `from visual3d import main` (entry 3D). |
 | `virtual_edge.py` | Gemelo ESP32: 3× HC-SR04 a 10 Hz, resolución 3 mm, ruido ~4 mm, blind 2 cm, votación 2-of-3 (`spread ≤ 15 mm`). |
-| `scenarios.py` | Controlador de eventos: `normal_day`, `pothole`, `corner`, `slow_leak`, `theft_3am`, `refill_authorized`, `sensor_fault`. `demo_script()` = orden del pitch. |
-| `cusum.py` | `RobustFuelMonitor`: CUSUM tabular por bloques (60 s) sobre pendiente del residuo; σ adaptativa por contexto; robo rápido vía tasa 20 s; `explain()` en español sin acentos en consola. `self_check_cusum()`. |
-| `pipeline.py` | Threads + `Bus` de colas nombradas: `fuel/raw`, `fuel/filtered`, `fuel/event`, `tank/state`. `run_pipeline()` determinista (Event + SENTINEL, sin hilos huérfanos). Flags `--duration --rt --baffles --mu --seed`. |
-| `bridge.py` | Loop en un hilo: physics + edge + monitor → POST `/api/fuel/ingest`. Lecturas cada 1 s; alertas al instante (flush inmediato). Flags: `--api --token --rt --duration --dry --label --tank-size --seed --mu --baffles`. |
-| `validate.py` | 5 métricas del reto. `--json PATH`, `--quick`. Bug corregido: confusión usaba `== 5` fijo; ahora `== runs_per_case`. |
+| `scenarios.py` | Controlador de eventos: **dispatch table** `_HANDLERS` (sin if/elif chain). `demo_script()` = orden del pitch. |
+| `cusum.py` | `RobustFuelMonitor`: CUSUM tabular por bloques; `update()` refactorizado en `_detect_rapid_theft`, `_evaluate_tabular_cusum`, `_alarm_loss/_alarm_refill`, `_calibrate_sigma` (complejidad baja). `explain()` en español sin acentos. `self_check_cusum()`. |
+| `pipeline.py` | **Síncrono** (sin threads GIL useless); `Bus` de colas nombradas acotadas (maxsize=4096, dropped real). **Tick 1 Hz por contador entero** (`step_index % ticks_per_second`). `RunConfig` dataclass agrupa parámetros. |
+| `bridge.py` | Loop en un hilo: physics + edge + monitor → POST `/api/fuel/ingest`. Flags: `--api --token --rt --duration --dry --label --tank-size --seed --mu --baffles`. |
+| `validate.py` | 5 métricas. Imprime **ambos modos FFT**. `main` partido en `_print_*` / `_quick_params`. `--json`, `--quick`. |
 | `results/validation.json` | Reporte full (20 días MC, etc.). |
 | `results/validation-quick.json` | Smoke `--quick`. |
 | `docs/teoria.md` | Derivación NS → modelo reducido → CUSUM. **Pendiente**: actualizar §2 a multimodal 3D y §7 límites. |
@@ -126,8 +126,9 @@ python bridge.py --api http://localhost:3000 --rt 1 --duration 1280
 
 | Endpoint | Archivo | Notas |
 |---|---|---|
-| `POST /api/fuel/ingest` | `src/app/api/fuel/ingest/route.ts` | Bearer `FUEL_INGEST_TOKEN` si está seteado. Payload: `{vehicle:{label,tankSize}, readings:[{timestamp,level,speed,accel}], alerts:[{timestamp,kind,confidence,explanation,dropAmount}]}`. Upsert vehicle, createMany readings, alerts con `atIndex` = índice de lecturas con `timestamp <= alert`. **Arreglado**: shadowing de `vehicle`, doble `request.json()` en POST, tipos `AlertType` desde `generated/prisma`. |
-| `GET /api/fuel/ingest` | idem | health `{status:"ok"}` |
+| `POST /api/fuel/ingest` | `src/app/api/fuel/ingest/route.ts` | Bearer `FUEL_INGEST_TOKEN` si está seteado. Payload validado con **zod** (`ingestSchema`). Upsert vehicle, createMany readings, alerts con `atIndex`. |
+| `GET /api/fuel/status` | `src/app/api/fuel/status/route.ts` | **Nuevo**: último estado para el frontend. `?label=&take=` → `{vehicle, reading, readings, alerts}`. |
+| `GET /api/fuel/ingest` | idem ingest | health `{status:"ok"}` |
 | `GET/POST /api/detect` | `src/app/api/detect/route.ts` | corre `runFuelDetection` (detección del equipo sobre readings). |
 | tRPC `fuel.getLatestReadings` | `src/server/api/routers/fuel.ts` | `{vehicleId?, take?}` |
 | tRPC `fuel.getAlerts` | idem | `{vehicleId?, take?}` |
@@ -267,5 +268,10 @@ Evidencia mínima: tsc verde, validate quick PASS, bridge dry con
 
 ---
 
-*Última sesión: fix ingest route + bridge terminado + HANDOFF + untrack
-`.agents`/`skills-lock` + `@unique(label)` + validate runs_per_case fix.*
+*Última sesión: revisión humana+IA aplicada (meshgrid vectorizado,
+sensores dinámicos con z_water, color=Z, precompute Bessel tubos,
+tick 1 Hz entero, Bus acotado, RunConfig, sync pipeline, cusum
+refactor, dispatch table scenarios, endpoint /api/fuel/status,
+validate ambos FFT, teoria 2 modos, gitignore *.html). Verificado:
+tank_model/cusum PASS, validate --quick PASS, bridge dry alerts=2,
+visual3d OK, tsc + next build verdes.*

@@ -30,6 +30,8 @@ class ScenarioController:
         self.leak_on = False
         self.refill_on = False
         self.refill_until = -float("inf")
+        if not ScenarioController._HANDLERS:
+            ScenarioController._HANDLERS = ScenarioController._make_handlers()
 
     def add(self, t: float, kind: str, **params) -> None:
         self.events.append({"t": t, "kind": kind, **params})
@@ -41,41 +43,74 @@ class ScenarioController:
 
     def _apply(self, ev: dict) -> None:
         kind = ev["kind"]
-        if kind == "engine_off":
+        handler = self._HANDLERS.get(kind)
+        if handler is not None:
+            handler(self, ev)
+
+    @classmethod
+    def _make_handlers(cls) -> dict:
+        def engine_off(self, ev):
             self.engine_on = False
             self.moving = False
-        elif kind == "engine_on":
+
+        def engine_on(self, ev):
             self.engine_on = True
-        elif kind == "moving":
+
+        def moving(self, ev):
             self.moving = ev.get("on", True)
             self.road.smooth = self.moving
-        elif kind == "pothole":
+
+        def pothole(self, ev):
             self.road.kick_bump(ev["t"], amp=ev.get("amp", 3.0))
-        elif kind == "corner":
+
+        def corner(self, ev):
             self.road.kick_corner(ev["t"], amp=ev.get("amp", 2.5),
                                   freq=ev.get("freq", 0.12),
                                   duration=ev.get("duration", 6.0))
-        elif kind == "leak_start":
+
+        def leak_start(self, ev):
             self.leak_on = True
             self.tank.flows.q_leak = ev.get("rate_lpm", 0.1) * LPM
-        elif kind == "leak_stop":
+
+        def leak_stop(self, ev):
             self.leak_on = False
             self.tank.flows.q_leak = 0.0
-        elif kind == "theft_start":
+
+        def theft_start(self, ev):
             self.theft_on = True
             self.engine_on = False
             self.moving = False
             self.road.smooth = False
             self.edge.tamper(ev["t"])
-        elif kind == "theft_stop":
+
+        def theft_stop(self, ev):
             self.theft_on = False
             self.engine_on = ev.get("resume", True)
-        elif kind == "refill_start":
+
+        def refill_start(self, ev):
             self.refill_on = True
-            self.refill_until = ev["t"] + ev.get("duration", 60.0)
-            self.edge.authorize(ev["t"], ev.get("duration", 60.0))
-        elif kind == "sensor_fault":
+            duration = ev.get("duration", 60.0)
+            self.refill_until = ev["t"] + duration
+            self.edge.authorize(ev["t"], duration)
+
+        def sensor_fault(self, ev):
             self.edge.set_sensor_fault(ev.get("index", 0), ev.get("on", True))
+
+        return {
+            "engine_off": engine_off,
+            "engine_on": engine_on,
+            "moving": moving,
+            "pothole": pothole,
+            "corner": corner,
+            "leak_start": leak_start,
+            "leak_stop": leak_stop,
+            "theft_start": theft_start,
+            "theft_stop": theft_stop,
+            "refill_start": refill_start,
+            "sensor_fault": sensor_fault,
+        }
+
+    _HANDLERS: dict = {}
 
     def advance(self, t: float) -> None:
         while self.cursor < len(self.events) and self.events[self.cursor]["t"] <= t:

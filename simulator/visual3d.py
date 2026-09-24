@@ -1,9 +1,11 @@
 """3D visualization of the tank with plotly (plotly.js under the hood).
 
-Renders the multimodal free surface eta(r, theta), the cylinder walls,
-the ring baffles (caps) and the 3 porous tubes placed in an equilateral
-triangle at the tank extremes - each tube carries its HC-SR04 sensor on
-top, with the ultrasonic beam down to its stilling-well level.
+Renders the multimodal free surface eta(r, theta) on a dense meshgrid
+(vectorized numpy, no Python double loop), the cylinder walls, ring
+baffles and the 3 porous tubes. Each HC-SR04 beam starts at the LOCAL
+free-surface height z_water (moves with the liquid), not at a fixed top
+plane. Surface color is bound to the same Z matrix as the geometry
+(single physical dimension, no dual color/height scale).
 
 Flags:
     --scenario {demo,normal,leak,theft,potholes}
@@ -31,6 +33,8 @@ from tank_model import FuelTank, RoadProfile, TankConfig
 from virtual_edge import VirtualEdge
 
 TUBE_R = 0.012
+MESH_NR = 48
+MESH_NT = 96
 
 
 def scenario_scripts():
@@ -53,19 +57,11 @@ def scenario_scripts():
     return {"normal": normal, "potholes": potholes, "leak": leak, "theft": theft}
 
 
-def _surface_grid(cfg: TankConfig, tank: FuelTank) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    nr, nt = 30, 60
-    r = np.linspace(0.0, cfg.radius, nr)
-    theta = np.linspace(0.0, 2.0 * np.pi, nt)
-    R, T = np.meshgrid(r, theta, indexing="ij")
-    X = R * np.cos(T)
-    Y = R * np.sin(T)
-    Z = np.full_like(X, tank.h)
-    for i in range(nr):
-        for j in range(nt):
-            eta = tank.surface(float(R[i, j]), float(T[i, j]))
-            Z[i, j] = np.clip(tank.h + eta, 0.0, cfg.height)
-    return X, Y, Z
+def _surface_grid(cfg: TankConfig, tank: FuelTank
+                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dense meshgrid surface: Z vectorized from mode states (Bessel array)."""
+    del cfg  # geometry lives on tank.cfg
+    return tank.surface_grid(nr=MESH_NR, nt=MESH_NT)
 
 
 def _wall_traces(cfg: TankConfig, h: float) -> list[go.Scatter3d]:
@@ -100,12 +96,14 @@ def _baffle_traces(cfg: TankConfig, on: bool) -> list[go.Scatter3d]:
     return traces
 
 
-def _tube_traces(cfg: TankConfig, tube_levels: np.ndarray) -> list[go.Scatter3d]:
-    """3 tubes at the extremes (equilateral triangle), sensor + beam each."""
+def _tube_traces(cfg: TankConfig, tank: FuelTank,
+                 tube_levels: np.ndarray) -> list[go.Scatter3d]:
+    """3 tubes + HC-SR04 beams anchored at the LOCAL free-surface height."""
     traces = []
     tt = np.linspace(0.0, 2.0 * np.pi, 12)
-    for (r_frac, theta), h_t in zip(cfg.tube_positions, tube_levels):
-        cx, cy = r_frac * cfg.radius * np.cos(theta), r_frac * cfg.radius * np.sin(theta)
+    positions = tank.tube_positions_xy()
+    for i, ((cx, cy), h_t) in enumerate(zip(positions, tube_levels)):
+        z_water = tank.get_local_height(cx, cy)
         x = cx + TUBE_R * np.cos(tt)
         y = cy + TUBE_R * np.sin(tt)
         traces.append(go.Scatter3d(
@@ -117,26 +115,37 @@ def _tube_traces(cfg: TankConfig, tube_levels: np.ndarray) -> list[go.Scatter3d]
         traces.append(go.Scatter3d(
             x=[cx, cx], y=[cy, cy], z=[0.0, cfg.height], mode="lines",
             line=dict(color="#f0f6fc", width=1, dash="dot"), showlegend=False))
+        # stilling-well reading tracks the (lagged) tube level
         traces.append(go.Scatter3d(
             x=[cx], y=[cy], z=[h_t], mode="markers",
-            marker=dict(size=3, color="#58a6ff"), showlegend=False))
+            marker=dict(size=4, color="#58a6ff"), name=f"tubo {i + 1}"))
+        # ultrasonic beam: from LOCAL water surface up to the sensor head
         traces.append(go.Scatter3d(
-            x=[cx, cx], y=[cy, cy], z=[cfg.height, h_t], mode="lines",
-            line=dict(color="#f85149", width=2), showlegend=False))
+            x=[cx, cx], y=[cy, cy], z=[z_water, cfg.height], mode="lines",
+            line=dict(color="#f85149", width=3),
+            name=f" haz {i + 1}"))
+        # sensor head marker sits ON the beam origin at z_water (moves with liquid)
+        traces.append(go.Scatter3d(
+            x=[cx], y=[cy], z=[z_water], mode="markers",
+            marker=dict(size=6, color="#f85149", symbol="diamond"),
+            name=f"sensor {i + 1}"))
         traces.append(go.Scatter3d(
             x=[cx], y=[cy], z=[cfg.height + 0.02], mode="markers",
-            marker=dict(size=5, color="#f85149"), showlegend=False))
+            marker=dict(size=5, color="#d29922"), name=f"HC-SR04 {i + 1}"))
     return traces
 
 
 def build_figure(cfg: TankConfig, tank: FuelTank, tube_levels: np.ndarray,
                  last_event: str | None) -> go.Figure:
     X, Y, Z = _surface_grid(cfg, tank)
-    traces = [go.Surface(x=X, y=Y, z=Z, colorscale="Viridis",
-                         colorbar=dict(title="nivel (m)"), showscale=True)]
+    # color bound to the same Z as geometry (single physical dimension)
+    traces = [go.Surface(x=X, y=Y, z=Z, surfacecolor=Z,
+                         colorscale="Viridis",
+                         colorbar=dict(title="Z (m)"),
+                         showscale=True)]
     traces += _wall_traces(cfg, tank.h)
     traces += _baffle_traces(cfg, tank.baffles)
-    traces += _tube_traces(cfg, tube_levels)
+    traces += _tube_traces(cfg, tank, tube_levels)
     fig = go.Figure(data=traces)
     title = (f"tanque 3D | nivel {100 * tank.h / cfg.height:.1f} % | "
              f"baffles {'ON' if tank.baffles else 'OFF'} | mu = {cfg.mu:.1e} Pa·s")
@@ -153,6 +162,16 @@ def build_figure(cfg: TankConfig, tank: FuelTank, tube_levels: np.ndarray,
         margin=dict(l=0, r=0, t=60, b=0),
     )
     return fig
+
+
+def _frame_data(cfg: TankConfig, tank: FuelTank) -> list:
+    X, Y, Z = _surface_grid(cfg, tank)
+    data: list = [go.Surface(x=X, y=Y, z=Z, surfacecolor=Z,
+                             colorscale="Viridis", showscale=True)]
+    data += _wall_traces(cfg, tank.h)
+    data += _baffle_traces(cfg, tank.baffles)
+    data += _tube_traces(cfg, tank, tank.tube_levels())
+    return data
 
 
 def run_scenario(args: argparse.Namespace) -> None:
@@ -173,12 +192,12 @@ def run_scenario(args: argparse.Namespace) -> None:
         duration = 1280.0
     else:
         scripts[args.scenario](ctl)
-        duration = {"normal": 400.0, "potholes": 520.0, "leak": 900.0, "theft": 400.0}[args.scenario]
+        duration = {"normal": 400.0, "potholes": 520.0, "leak": 900.0,
+                    "theft": 400.0}[args.scenario]
 
     frame_dt = args.frame_dt
     steps_per_frame = max(1, int(frame_dt / cfg.dt))
     max_frames = args.frames
-    sim_per_frame = steps_per_frame * cfg.dt
 
     base_tank = FuelTank(cfg)
     base_tank.baffles = tank.baffles
@@ -200,12 +219,7 @@ def run_scenario(args: argparse.Namespace) -> None:
                                 ctx["engine_on"], ctx["moving"])
                 if ev is not None:
                     last_event = mon.explain(ev)
-        X, Y, Z = _surface_grid(cfg, tank)
-        frame_data = [go.Surface(x=X, y=Y, z=Z, colorscale="Viridis", showscale=True)]
-        frame_data += _wall_traces(cfg, tank.h)
-        frame_data += _baffle_traces(cfg, tank.baffles)
-        frame_data += _tube_traces(cfg, tank.tube_levels())
-        frames.append(go.Frame(data=frame_data, name=f"f{collected}"))
+        frames.append(go.Frame(data=_frame_data(cfg, tank), name=f"f{collected}"))
         collected += 1
 
     fig.frames = frames

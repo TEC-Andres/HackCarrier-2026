@@ -1,21 +1,18 @@
 """Pipeline: physics (3D) -> virtual edge -> filter -> CUSUM classifier.
 
-Single process, threads per stage, named queues acting as the topic bus.
-The queue names mirror the MQTT topics a production ESP32 would publish
-on (fuel/raw, fuel/filtered, fuel/event...), so swapping the digital twin
-for real hardware only touches the simulation thread.
+Single-process synchronous stages (GIL makes CPU-bound threads useless
+for numpy work); the named-queue Bus remains as the MQTT-like topic
+interface so a real ESP32 bridge can replace the in-process sim later.
 
-Stages:
-    [SimThread]      tank physics (RK4, 3D multimodal) + scenario controller
-                     + virtual edge
-                     -> 'fuel/raw'      (10 Hz sensor frames + context)
-                     -> 'tank/state'    (true level/slosh for metrics & viz)
-    [AnalysisThread] stability-gate EMA filter + consumption model + CUSUM
-                     -> 'fuel/filtered' (filtered + expected + rate)
-                     -> 'fuel/event'    (classified events + explanation)
+Stages (in one loop):
+    tank physics (RK4, 3D multimodal) + scenario controller + virtual edge
+        -> 'fuel/raw'      (10 Hz sensor frames + context)
+        -> 'tank/state'    (true level/slosh, published on integer 1 Hz ticks)
+    stability-gate EMA filter + consumption model + CUSUM
+        -> 'fuel/filtered' (filtered + expected + rate)
+        -> 'fuel/event'    (classified events + explanation)
 
-Real-time pacing: pass rt (e.g. rt=1 for wall-clock) to make the sim
-produce data at the same rate a real vehicle would; rt=None runs
+Real-time pacing: pass rt (e.g. rt=1 for wall-clock); rt=None runs
 flat-out (validation).
 """
 
@@ -23,8 +20,8 @@ from __future__ import annotations
 
 import argparse
 import queue
-import threading
 import time
+from dataclasses import dataclass, field
 
 from cusum import Event, RobustFuelMonitor
 from scenarios import ScenarioController
@@ -32,20 +29,40 @@ from tank_model import FuelTank, RoadProfile, TankConfig
 from virtual_edge import VirtualEdge
 
 SENTINEL = None
+BUS_MAXSIZE = 4096
+
+
+@dataclass
+class RunConfig:
+    """Bundled run parameters (replaces long parameter lists)."""
+
+    duration: float = 1280.0
+    dt: float = 0.05
+    seed: int = 0
+    h0: float | None = None
+    baffles: bool = True
+    rt: float | None = None
+    tank: TankConfig | None = None
+    topics: list[str] = field(default_factory=lambda: [
+        "fuel/raw", "fuel/filtered", "fuel/event", "tank/state"])
 
 
 class Bus:
-    def __init__(self, topics: list[str], maxsize: int = 0):
+    """Named queues acting as an MQTT-like topic bus (bounded)."""
+
+    def __init__(self, topics: list[str], maxsize: int = BUS_MAXSIZE):
         self.topics = topics
         self.q = {t: queue.Queue(maxsize=maxsize) for t in topics}
         self.dropped = {t: 0 for t in topics}
         self.maxsize = maxsize
 
-    def put(self, topic: str, item) -> None:
+    def put(self, topic: str, item) -> bool:
         try:
             self.q[topic].put_nowait(item)
+            return True
         except queue.Full:
             self.dropped[topic] += 1
+            return False
 
     def get(self, topic: str, timeout: float = 0.5):
         try:
@@ -63,84 +80,6 @@ class Bus:
         return out
 
 
-class SimThread(threading.Thread):
-    def __init__(self, bus: Bus, cfg: TankConfig, controller: ScenarioController,
-                 edge: VirtualEdge, road: RoadProfile, duration: float, seed: int,
-                 rt: float | None = None):
-        super().__init__(daemon=True)
-        self.bus = bus
-        self.cfg = cfg
-        self.controller = controller
-        self.edge = edge
-        self.road = road
-        self.duration = duration
-        self.seed = seed
-        self.rt = rt
-        self.done = threading.Event()
-
-    def run(self) -> None:
-        tank = self.controller.tank
-        wall_t0 = time.time()
-        while tank.t < self.duration:
-            self.road.step(self.cfg.dt, tank.t)
-            ax, ay = self.road.value(tank.t)
-            self.controller.advance(tank.t)
-            tank.step(ax, ay)
-            frame = self.edge.sample()
-            if frame is not None:
-                frame["ctx"] = self.controller.context()
-                self.bus.put("fuel/raw", frame)
-            if tank.t % 1.0 < self.cfg.dt:
-                self.bus.put("tank/state", {
-                    "t": float(tank.t),
-                    "h_true": float(tank.h),
-                    "slosh_x": float(tank.slosh_x),
-                    "accel": float((ax * ax + ay * ay) ** 0.5),
-                })
-            if self.rt is not None:
-                target = time.time() - wall_t0
-                desired = tank.t / self.rt
-                delay = desired - target
-                if delay > 0:
-                    time.sleep(min(delay, 0.1))
-        self.done.set()
-
-
-class AnalysisThread(threading.Thread):
-    def __init__(self, bus: Bus, monitor: RobustFuelMonitor):
-        super().__init__(daemon=True)
-        self.bus = bus
-        self.monitor = monitor
-
-    def run(self) -> None:
-        while True:
-            frame = self.bus.get("fuel/raw", timeout=1.0)
-            if frame is SENTINEL:
-                break
-            if frame is None:
-                continue
-            ctx = frame.get("ctx", {})
-            ev = self.monitor.update(
-                frame["t"], frame["voted"], frame["agree"], frame["auth"],
-                ctx.get("engine_on", True), ctx.get("moving", False))
-            self.bus.put("fuel/filtered", {
-                "t": frame["t"],
-                "filtered": self.monitor.filtered,
-                "expected": self.monitor.expected,
-                "rate_lpm": self.monitor.rate_lpm,
-            })
-            if ev is not None:
-                self.bus.put("fuel/event", {
-                    "t": ev.t,
-                    "kind": ev.kind,
-                    "confidence": ev.confidence,
-                    "drop_frac": ev.drop_frac,
-                    "rate_lpm": ev.rate_lpm,
-                    "evidence": ev.evidence,
-                    "explanation": self.monitor.explain(ev),
-                })
-
-
 class PipelineResult:
     def __init__(self, events: list[dict], filtered: list[dict], states: list[dict],
                  dropped: dict | None = None):
@@ -155,8 +94,21 @@ class PipelineResult:
 
 def run_pipeline(build_script, duration: float, cfg: TankConfig | None = None,
                  dt: float = 0.05, seed: int = 0, h0: float | None = None,
-                 baffles: bool = True, rt: float | None = None) -> PipelineResult:
-    """Run one simulation end-to-end and collect every published frame."""
+                 baffles: bool = True, rt: float | None = None,
+                 run: RunConfig | None = None) -> PipelineResult:
+    """Run one simulation end-to-end synchronously; collect every frame."""
+    if run is not None:
+        duration = run.duration
+        dt = run.dt
+        seed = run.seed
+        h0 = run.h0
+        baffles = run.baffles
+        rt = run.rt
+        cfg = run.tank
+        topics = run.topics
+    else:
+        topics = ["fuel/raw", "fuel/filtered", "fuel/event", "tank/state"]
+
     cfg = cfg or TankConfig.demo()
     cfg.dt = dt
     tank = FuelTank(cfg, h0=h0)
@@ -166,15 +118,57 @@ def run_pipeline(build_script, duration: float, cfg: TankConfig | None = None,
     controller = ScenarioController(tank, road, edge)
     build_script(controller)
 
-    bus = Bus(["fuel/raw", "fuel/filtered", "fuel/event", "tank/state"])
-    sim = SimThread(bus, cfg, controller, edge, road, duration, seed, rt=rt)
+    bus = Bus(topics)
     mon = RobustFuelMonitor(cfg)
-    ana = AnalysisThread(bus, mon)
-    sim.start()
-    ana.start()
-    sim.join()
-    bus.put("fuel/raw", SENTINEL)
-    ana.join()
+    ticks_per_second = max(1, int(round(1.0 / cfg.dt)))
+    step_index = 0
+    wall_t0 = time.time() if rt is not None else 0.0
+
+    while tank.t < duration:
+        road.step(cfg.dt, tank.t)
+        ax, ay = road.value(tank.t)
+        controller.advance(tank.t)
+        tank.step(ax, ay)
+        step_index += 1
+
+        # integer 1 Hz tick (no float modulo skip/double)
+        if step_index % ticks_per_second == 0:
+            bus.put("tank/state", {
+                "t": float(tank.t),
+                "h_true": float(tank.h),
+                "slosh_x": float(tank.slosh_x),
+                "accel": float((ax * ax + ay * ay) ** 0.5),
+            })
+
+        frame = edge.sample()
+        if frame is not None:
+            frame["ctx"] = controller.context()
+            bus.put("fuel/raw", frame)
+            ctx = frame["ctx"]
+            ev: Event | None = mon.update(
+                frame["t"], frame["voted"], frame["agree"], frame["auth"],
+                ctx.get("engine_on", True), ctx.get("moving", False))
+            bus.put("fuel/filtered", {
+                "t": frame["t"],
+                "filtered": mon.filtered,
+                "expected": mon.expected,
+                "rate_lpm": mon.rate_lpm,
+            })
+            if ev is not None:
+                bus.put("fuel/event", {
+                    "t": ev.t,
+                    "kind": ev.kind,
+                    "confidence": ev.confidence,
+                    "drop_frac": ev.drop_frac,
+                    "rate_lpm": ev.rate_lpm,
+                    "evidence": ev.evidence,
+                    "explanation": mon.explain(ev),
+                })
+
+        if rt is not None:
+            delay = tank.t / rt - (time.time() - wall_t0)
+            if delay > 0:
+                time.sleep(min(delay, 0.1))
 
     return PipelineResult(
         events=bus.drain("fuel/event"),
@@ -208,8 +202,9 @@ def main() -> None:
     cfg = TankConfig.demo()
     if args.mu is not None:
         cfg.mu = args.mu
-    res = run_pipeline(demo_script, args.duration, cfg=cfg, seed=args.seed,
-                       baffles=args.baffles == "on", rt=args.rt)
+    run = RunConfig(duration=args.duration, seed=args.seed,
+                    baffles=args.baffles == "on", rt=args.rt, tank=cfg)
+    res = run_pipeline(demo_script, args.duration, run=run)
     print_events(res)
 
 

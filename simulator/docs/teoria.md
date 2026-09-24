@@ -17,29 +17,36 @@ VOF/SPH) es costoso; para control y monitoreo la industria usa el
 masa-resorte-amortiguador, con parametros derivados analiticamente
 del potencial.
 
-## 2. Modo 1 antisimetrico de un cilindro (lo que usa la simulacion)
+## 2. Modos antisimetricos de un cilindro (lo que usa la simulacion)
 
-Para un tanque cilindrico de radio R y nivel h, el primer modo
-antisimetrico tiene k1·R = 1.841 (primera raiz de J1'(x) = 0):
+Para un tanque cilindrico de radio R y nivel h, los primeros dos modos
+antisimetricos (m = 1) tienen k1·R = 1.841 y k2·R = 5.331 (raices de
+J1'(x) = 0):
 
-    omega1^2 = (1.841 g / R) tanh(1.841 h / R)
-    m_s      = m_liq · 2R·tanh(1.841 h/R) / (h · 1.841 · (1.841^2 - 1))
+    omega_n^2 = (k_n g) tanh(k_n h)
+    m_s       = m_liq · 2 tanh(k_n h) / (h k_n ((k_n R)^2 - 1))
 
 Modelo mecanico equivalente (masa-resorte-amortiguador; equivalencia
 exacta con el pendulo linealizado, ver "Equivalent Mechanical Models
 for Sloshing", arXiv:2511.10172):
 
     m_s x'' + c_s x' + k_s x = -m_s a(t)
-    k_s = m_s omega1^2        c_s = 2 zeta m_s omega1
-    =>  x'' = -omega1^2 x - 2 zeta omega1 x' - a(t)
+    k_s = m_s omega_n^2        c_s = 2 zeta m_s omega_n
+    =>  x'' = -omega_n^2 x - 2 zeta omega_n x' - a(t)
 
-`tank_model.py` integra el estado [h, x, x', h_tubo1..3] con RK4
-clasico (dt = 0.05 s). La frecuencia natural depende de h(t), asi que
-el sistema es lentamente variable; RK4 lo absorbe sin problema.
+Cada modo resuelve DOS orientaciones azimutales (cos theta / sin theta),
+asi la superficie libre es una forma 3D real:
 
-**Autovalidacion**: un barrido FFT de la respuesta libre debe pico en
-omega1/(2 pi). Resultado: 1.750 Hz medido vs 1.746 Hz analitico
-(error 0.23 %).
+    eta(r, theta, t) = sum_n J1(k_n r) (x_n(t) cos theta + y_n(t) sin theta)
+
+`tank_model.py` integra el estado [h, (x,x',y,y')×2 modos, tubo1..3] con
+RK4 clasico (dt = 0.02 s por defecto en TankConfig; validate.py usa
+0.05 s para correr mas rapido). La frecuencia natural depende de h(t),
+asi que el sistema es lentamente variable; RK4 lo absorbe sin problema.
+
+**Autovalidacion**: un barrido FFT de la respuesta libre de cada modo
+debe picar en omega_n/(2 pi). Resultado modo 0: 1.750 Hz medido vs
+1.746 Hz analitico (error 0.23 %); validate imprime ambos modos.
 
 ## 3. Caudales (Navier-Stokes en tuberia, forma cerrada)
 
@@ -109,8 +116,9 @@ simulados.
 
 ## 7. Supuestos y limites (honestidad)
 
-- Modelo de orden reducido lineal (1 modo): valido para amplitudes
-  pequenas-moderadas; no modela breaking waves ni swirl.
+- Modelo de orden reducido lineal (2 modos antisimetricos × 2
+  orientaciones): valido para amplitudes pequenas-moderadas; no modela
+  breaking waves ni swirl.
 - El sim acelera el tiempo (speedup 20x) solo para la demo; todas las
   metricas corren a velocidad fisica.
 - Los costos citados son de fuentes publicas (Shell, PEMEX, Canacar);

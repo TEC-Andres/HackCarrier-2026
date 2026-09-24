@@ -4,7 +4,8 @@
        -> target: zero classified anomalies.
     2. Leak sensitivity: detection delay vs leak size (CUSUM slope path).
     3. Confusion matrix: normal / pothole / refill / leak / theft.
-    4. Physics self-validation: FFT peak vs analytic cylindrical omega1.
+    4. Physics self-validation: FFT peak vs analytic cylindrical omega
+       (both modes printed).
     5. Baffle gain: residual noise with baffles on vs off.
 
 Runs at physical speed (speedup=1) so the statistics are honest; the demo
@@ -17,12 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
+from typing import Callable
 
 import numpy as np
 
-import cusum as cusum_mod
-import scenarios as sc
 from pipeline import run_pipeline
 from tank_model import TankConfig, self_check_sloshing
 
@@ -68,11 +67,9 @@ def metric_leak_curve(cfg, rates_lpm=(0.8, 0.4, 0.2, 0.1),
     return {"curve": curve}
 
 
-def metric_confusion(cfg, runs_per_case: int = 5) -> dict:
-    cases = {}
-
+def _case_scripts() -> dict[str, Callable]:
     def empty(controller, t0=20.0):
-        pass
+        return None
 
     def potholes(controller, t0=20.0):
         for k in range(6):
@@ -88,26 +85,34 @@ def metric_confusion(cfg, runs_per_case: int = 5) -> dict:
         controller.schedule([(t0 + 30, "engine_off", {}),
                              (t0 + 60, "theft_start", {})])
 
-    truth = {"normal": empty, "pothole": potholes, "refill": refill,
-             "leak": leak, "theft": theft}
-    duration = {"normal": 600.0, "pothole": 600.0, "refill": 300.0,
-                "leak": 1200.0, "theft": 900.0}
+    return {"normal": empty, "pothole": potholes, "refill": refill,
+            "leak": leak, "theft": theft}
+
+
+_CASE_DURATION = {"normal": 600.0, "pothole": 600.0, "refill": 300.0,
+                  "leak": 1200.0, "theft": 900.0}
+_CASE_EXPECTED = {"normal": "none", "pothole": "none", "refill": "none",
+                  "leak": "leak", "theft": "theft"}
+
+
+def metric_confusion(cfg, runs_per_case: int = 5) -> dict:
+    truth = _case_scripts()
+    cases: dict[str, list[str]] = {}
     for name, script in truth.items():
         predicted = []
         for seed in range(runs_per_case):
-            res = run_pipeline(script, duration[name], cfg=cfg, seed=seed)
+            res = run_pipeline(script, _CASE_DURATION[name], cfg=cfg, seed=seed)
             kinds = [e["kind"] for e in res.events if e["kind"] != "refill"]
             predicted.append(kinds[0] if kinds else "none")
         cases[name] = predicted
-    matrix = {}
-    for name in truth:
-        matrix[name] = {pred: cases[name].count(pred) for pred in
-                        sorted(set(cases[name]))}
-    expected = {"normal": "none", "pothole": "none", "refill": "none",
-                "leak": "leak", "theft": "theft"}
+    matrix = {
+        name: {pred: cases[name].count(pred)
+               for pred in sorted(set(cases[name]))}
+        for name in truth
+    }
     correct = sum(1 for name in truth
-                  if cases[name].count(expected[name]) == runs_per_case)
-    return {"matrix": matrix, "expected": expected,
+                  if cases[name].count(_CASE_EXPECTED[name]) == runs_per_case)
+    return {"matrix": matrix, "expected": dict(_CASE_EXPECTED),
             "pass": correct == len(truth)}
 
 
@@ -132,10 +137,44 @@ def metric_baffle_gain(cfg, duration: float = 600.0) -> dict:
             "snr_gain": round(amps["off"] / max(amps["on"], 1e-9), 2)}
 
 
+def _print_physics(physics: dict) -> None:
+    for m in physics["modes"]:
+        status = "PASS" if m["pass"] else "FAIL"
+        print(f"[4] fisica modo {m['mode']} (kR={m['kR']}): "
+              f"FFT {m['f_fft_hz']:.3f} Hz vs analitico "
+              f"{m['f_analytic_hz']:.3f} Hz ({m['err_pct']:.2f} %) -> {status}")
+
+
+def _print_leak(leak: dict) -> None:
+    print("[2] curva fuga -> retraso (mediana, semillas configuradas):")
+    for c in leak["curve"]:
+        d = (f"{c['detection_delay_s']:.0f} s"
+             if c["detection_delay_s"] is not None else "NO")
+        print(f"      {c['leak_lpm']:5.2f} L/min -> {d}  [{c['runs_detected']}]")
+
+
+def _print_confusion(conf: dict) -> None:
+    status = "PASS" if conf["pass"] else "FAIL"
+    print(f"[3] matriz de confusion ({status}):")
+    for name, row in conf["matrix"].items():
+        print(f"      {name:>8s} esperado={conf['expected'][name]:>5s} -> {row}")
+
+
+def _quick_params() -> dict:
+    return {"runs": 5, "duration": 300.0, "rates": (0.8, 0.1),
+            "seeds": (7,), "runs_per_case": 2}
+
+
+def _full_params() -> dict:
+    return {"runs": 20, "duration": 900.0, "rates": (0.8, 0.4, 0.2, 0.1),
+            "seeds": (7, 8, 9), "runs_per_case": 5}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", metavar="PATH", default=None)
-    parser.add_argument("--quick", action="store_true", help="Run quick smoke test (reduced runs/durations)")
+    parser.add_argument("--quick", action="store_true",
+                        help="Run quick smoke test (reduced runs/durations)")
     args = parser.parse_args()
 
     cfg = TankConfig.demo()
@@ -143,41 +182,23 @@ def main() -> None:
     cfg.dt = 0.05
 
     physics = self_check_sloshing()
-    m0 = physics["modes"][0]
-
     if args.quick:
-        runs = 5
-        duration = 300.0
-        rates = (0.8, 0.1)
-        seeds = (7,)
-        runs_per_case = 2
-        leak_duration = 600.0
         print("[QUICK MODE] Reduced runs/durations for speed")
+        p = _quick_params()
     else:
-        runs = 20
-        duration = 900.0
-        rates = (0.8, 0.4, 0.2, 0.1)
-        seeds = (7, 8, 9)
-        runs_per_case = 5
+        p = _full_params()
 
-    print(f"[4] fisica: FFT {m0['f_fft_hz']:.3f} Hz vs analitico "
-          f"{m0['f_analytic_hz']:.3f} Hz ({m0['err_pct']:.2f} %) "
-          f"-> {'PASS' if physics['pass'] else 'FAIL'}")
+    _print_physics(physics)
 
-    fa = metric_false_alarms(cfg, runs=runs, duration=duration)
-    print(f"[1] falsas alarmas MC {runs} dias normales: "
+    fa = metric_false_alarms(cfg, runs=p["runs"], duration=p["duration"])
+    print(f"[1] falsas alarmas MC {p['runs']} dias normales: "
           f"{fa['false_alarms']} -> {'PASS' if fa['pass'] else 'FAIL'}")
 
-    leak = metric_leak_curve(cfg, rates, seeds)
-    print("[2] curva fuga -> retraso (mediana, 3 semillas):")
-    for c in leak["curve"]:
-        d = f"{c['detection_delay_s']:.0f} s" if c["detection_delay_s"] is not None else "NO"
-        print(f"      {c['leak_lpm']:5.2f} L/min -> {d}  [{c['runs_detected']}]")
+    leak = metric_leak_curve(cfg, p["rates"], p["seeds"])
+    _print_leak(leak)
 
-    conf = metric_confusion(cfg, runs_per_case=runs_per_case)
-    print(f"[3] matriz de confusion ({'PASS' if conf['pass'] else 'FAIL'}):")
-    for name, row in conf["matrix"].items():
-        print(f"      {name:>8s} esperado={conf['expected'][name]:>5s} -> {row}")
+    conf = metric_confusion(cfg, runs_per_case=p["runs_per_case"])
+    _print_confusion(conf)
 
     gain = metric_baffle_gain(cfg)
     print(f"[5] baffles: amplitud slosh {gain['amp_off_mm']} mm -> "

@@ -68,8 +68,8 @@
     "pass": true
   },
   "baffle_gain": {
-    "amp_on_mm": 1.267,
-    "amp_off_mm": 12.331,
-    "snr_gain": 9.73
+    "amp_on_mm": 1.365,
+    "amp_off_mm": 12.339,
+    "snr_gain": 9.04
   }
 }

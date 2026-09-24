@@ -65,6 +65,33 @@ def bessel_j1(x: float) -> float:
     return f1 * np.cos(theta1) / np.sqrt(x)
 
 
+def bessel_j1_array(x: np.ndarray) -> np.ndarray:
+    """Vectorized J1 (same A&S approximation, elementwise on ndarrays)."""
+    xa = np.asarray(x, dtype=np.float64)
+    ax = np.abs(xa)
+    out = np.empty_like(ax)
+    lo = ax <= 3.0
+    hi = ~lo
+    if np.any(lo):
+        t = ax[lo] / 3.0
+        t2 = t * t
+        poly = (0.5 - 0.56249985 * t2 + 0.21093573 * t2**2 - 0.03954289 * t2**3
+                + 0.00443319 * t2**4 - 0.00031761 * t2**5 + 0.00001109 * t2**6)
+        out[lo] = ax[lo] * poly
+    if np.any(hi):
+        xh = ax[hi]
+        t = 3.0 / xh
+        t2 = t * t
+        f1 = (0.79788456 + 0.00000156 * t + 0.01659667 * t2 + 0.00017105 * t2 * t
+              - 0.00249511 * t2**2 + 0.00113653 * t2**2 * t - 0.00020033 * t2**3)
+        theta1 = (xh - 2.35619449 + 0.12499612 * t + 0.00005650 * t2
+                  - 0.00637879 * t2 * t + 0.00074348 * t2**2
+                  + 0.00079824 * t2**2 * t - 0.00029166 * t2**3)
+        out[hi] = f1 * np.cos(theta1) / np.sqrt(xh)
+    out = np.where(xa < 0.0, -out, out)
+    return out
+
+
 @dataclass
 class TankConfig:
     """Geometry and fluid properties. All SI units unless noted."""
@@ -200,6 +227,20 @@ class FuelTank:
         self.baffles = True
         self.flows = Flows()
         self.motor_q = self.cfg.motor_gph * 3.785411784e-3 / 3600.0 * self.cfg.speedup
+        # Precompute constant J1(k_n * r_i) for the 3 tube radii (fixed geometry).
+        self._tube_r = np.array(
+            [r_frac * self.cfg.radius for r_frac, _ in self.cfg.tube_positions],
+            dtype=np.float64,
+        )
+        self._tube_theta = np.array(
+            [th for _, th in self.cfg.tube_positions], dtype=np.float64)
+        self._tube_j1 = np.zeros((self.N_MODES, 3), dtype=np.float64)
+        for n in range(self.N_MODES):
+            k = kn(self.cfg, n)
+            self._tube_j1[n, :] = bessel_j1_array(k * self._tube_r)
+        self._tube_cos = np.cos(self._tube_theta)
+        self._tube_sin = np.sin(self._tube_theta)
+        self._kn = np.array([kn(self.cfg, n) for n in range(self.N_MODES)])
 
     # -- state accessors -------------------------------------------------
     @property
@@ -220,16 +261,49 @@ class FuelTank:
     def volume_l(self) -> float:
         return float(self.cfg.area * self.h * 1000.0)
 
+    def get_local_height(self, x: float, y: float) -> float:
+        """Absolute free-surface height z = h + eta at cartesian (x, y)."""
+        r = float(np.hypot(x, y))
+        theta = float(np.arctan2(y, x))
+        return float(np.clip(self.h + self.surface(r, theta),
+                             0.0, self.cfg.height))
+
     # -- physics ----------------------------------------------------------
     def surface(self, r: float, theta: float) -> float:
         """Free-surface displacement eta(r, theta) above the mean level."""
         eta = 0.0
+        rr = max(float(r), 0.0)
+        ct = np.cos(theta)
+        st = np.sin(theta)
         for n in range(self.N_MODES):
             k = kn(self.cfg, n)
             x, _, y, _ = self.mode_state(n)
-            shape = bessel_j1(k * max(r, 0.0))
-            eta += shape * (x * np.cos(theta) + y * np.sin(theta))
+            eta += bessel_j1(k * rr) * (x * ct + y * st)
         return float(eta)
+
+    def surface_grid(self, nr: int = 48, nt: int = 96
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Vectorized free surface on a meshgrid (no Python double loop)."""
+        r = np.linspace(0.0, self.cfg.radius, nr)
+        theta = np.linspace(0.0, 2.0 * np.pi, nt, endpoint=False)
+        R, T = np.meshgrid(r, theta, indexing="ij")
+        X = R * np.cos(T)
+        Y = R * np.sin(T)
+        Z = np.full_like(X, self.h)
+        ct = np.cos(T)
+        st = np.sin(T)
+        J = bessel_j1_array(np.multiply.outer(self._kn, R))
+        for n in range(self.N_MODES):
+            x, _, y, _ = self.mode_state(n)
+            Z = Z + J[n] * (x * ct + y * st)
+        np.clip(Z, 0.0, self.cfg.height, out=Z)
+        return X, Y, Z
+
+    def tube_positions_xy(self) -> list[tuple[float, float]]:
+        """Cartesian (x, y) of the 3 porous tubes (sensor columns)."""
+        return [(float(r * self.cfg.radius * np.cos(th)),
+                 float(r * self.cfg.radius * np.sin(th)))
+                for r, th in self.cfg.tube_positions]
 
     def zeta(self, n: int) -> float:
         """Total damping ratio of mode n: surface + baffles + viscous."""
@@ -260,20 +334,35 @@ class FuelTank:
             d[i + 2] = state[i + 3]
             d[i + 3] = -omega2 * state[i + 2] - damp * state[i + 3] - ay
         tau = self.tube_tau()
-        for j, (r_frac, theta) in enumerate(cfg.tube_positions):
-            target = h + self.surface_from(state, r_frac * cfg.radius, theta)
+        for j in range(3):
+            eta_j = 0.0
+            for n in range(self.N_MODES):
+                i = 1 + 4 * n
+                eta_j += (self._tube_j1[n, j]
+                          * (state[i] * self._tube_cos[j]
+                             + state[i + 2] * self._tube_sin[j]))
+            target = h + eta_j
             d[-3 + j] = (target - state[-3 + j]) / tau
         return d
 
     def surface_from(self, state: np.ndarray, r: float, theta: float) -> float:
         """Surface displacement from an arbitrary state vector."""
         eta = 0.0
+        rr = max(float(r), 0.0)
+        ct = np.cos(theta)
+        st = np.sin(theta)
         for n in range(self.N_MODES):
             k = kn(self.cfg, n)
             i = 1 + 4 * n
-            shape = bessel_j1(k * max(r, 0.0))
-            eta += shape * (state[i] * np.cos(theta) + state[i + 2] * np.sin(theta))
+            eta += bessel_j1(k * rr) * (state[i] * ct + state[i + 2] * st)
         return float(eta)
+
+    def local_height_from(self, state: np.ndarray, x: float, y: float) -> float:
+        """Free-surface z at (x, y) for an arbitrary state vector."""
+        r = float(np.hypot(x, y))
+        theta = float(np.arctan2(y, x))
+        return float(np.clip(state[0] + self.surface_from(state, r, theta),
+                             0.0, self.cfg.height))
 
     def step(self, ax: float, ay: float = 0.0, dt: float | None = None) -> None:
         """Advance one RK4 step with 3D lateral acceleration (ax, ay)."""
@@ -296,25 +385,27 @@ def _fft_peak(signal: np.ndarray, dt: float) -> float:
     return float(freqs[np.argmax(spec)])
 
 
+def _mode_fft(cfg: TankConfig, n: int) -> dict:
+    tank = FuelTank(cfg)
+    tank.baffles = False
+    tank.motor_q = 0.0
+    tank.state[1 + 4 * n] = 1.0e-3
+    xs = []
+    for _ in range(int(120.0 / cfg.dt)):
+        tank.step(0.0, 0.0)
+        if tank.t > 20.0:
+            xs.append(tank.state[1 + 4 * n])
+    peak = _fft_peak(np.asarray(xs), cfg.dt)
+    analytic = slosh_freq(cfg, tank.h0, n) / (2.0 * PI)
+    err = 100.0 * abs(peak - analytic) / analytic
+    return {"mode": n, "kR": K_ROOTS[n], "f_analytic_hz": analytic,
+            "f_fft_hz": peak, "err_pct": err, "pass": err < 5.0}
+
+
 def self_check_sloshing(cfg: TankConfig | None = None) -> dict:
     """Gate: FFT peak of each simulated mode vs its analytic cylindrical omega."""
     cfg = cfg or TankConfig.demo()
-    results = []
-    for n in range(FuelTank.N_MODES):
-        tank = FuelTank(cfg)
-        tank.baffles = False
-        tank.motor_q = 0.0
-        tank.state[1 + 4 * n] = 1.0e-3
-        xs = []
-        for _ in range(int(120.0 / cfg.dt)):
-            tank.step(0.0, 0.0)
-            if tank.t > 20.0:
-                xs.append(tank.state[1 + 4 * n])
-        peak = _fft_peak(np.asarray(xs), cfg.dt)
-        analytic = slosh_freq(cfg, tank.h0, n) / (2.0 * PI)
-        err = 100.0 * abs(peak - analytic) / analytic
-        results.append({"mode": n, "kR": K_ROOTS[n], "f_analytic_hz": analytic,
-                        "f_fft_hz": peak, "err_pct": err, "pass": err < 5.0})
+    results = [_mode_fft(cfg, n) for n in range(FuelTank.N_MODES)]
     return {"modes": results, "pass": all(r["pass"] for r in results)}
 
 
