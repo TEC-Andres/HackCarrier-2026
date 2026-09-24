@@ -50,18 +50,22 @@ def scenario_scripts():
         ctl.schedule([(t0 + 5, "moving", {"on": True}),
                       (t0 + 400, "leak_start", {"rate_lpm": 0.5})])
 
-    def theft(ctl, t0=20.0):
-        ctl.schedule([(t0 + 30, "engine_off", {}),
-                      (t0 + 60, "theft_start", {})])
+    def theft(ctl, t0=0.5):
+        ctl.schedule([(t0, "engine_off", {}),
+                      (t0 + 1.0, "pothole", {"amp": 300.0}),
+                      (t0 + 1.2, "theft_start", {})])
 
     return {"normal": normal, "potholes": potholes, "leak": leak, "theft": theft}
 
 
 def _surface_grid(cfg: TankConfig, tank: FuelTank
                   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Dense meshgrid surface: Z vectorized from mode states (Bessel array)."""
-    del cfg  # geometry lives on tank.cfg
-    return tank.surface_grid(nr=MESH_NR, nt=MESH_NT)
+    """Dense meshgrid surface: Z vectorized from mode states (Bessel array).
+    Clipped to [0, cfg.height] so the rendered wave can't poke through the
+    tank walls/lid — visual only, tank.state (physics) is untouched."""
+    X, Y, Z = tank.surface_grid(nr=MESH_NR, nt=MESH_NT)
+    Z = np.clip(Z, 0.0, cfg.height)
+    return X, Y, Z
 
 
 def _wall_traces(cfg: TankConfig, h: float) -> list[go.Scatter3d]:
