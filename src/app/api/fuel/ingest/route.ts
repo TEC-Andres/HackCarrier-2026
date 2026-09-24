@@ -1,6 +1,36 @@
 import type { AlertType } from "../../../../../generated/prisma";
 
+import { z } from "zod";
+
 import { db } from "~/server/db";
+
+const readingSchema = z.object({
+  timestamp: z.union([z.string(), z.date()]),
+  level: z.number().min(0),
+  speed: z.number().optional().default(0),
+  accel: z.number().optional().default(0),
+});
+
+const alertSchema = z.object({
+  timestamp: z.union([z.string(), z.date()]),
+  kind: z.string().optional(),
+  type: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional().default(0.5),
+  explanation: z.string().optional(),
+  reason: z.string().optional(),
+  dropAmount: z.number().optional().default(0),
+});
+
+const ingestSchema = z.object({
+  vehicle: z.object({
+    label: z.string().min(1),
+    tankSize: z.number().positive(),
+  }),
+  readings: z.array(readingSchema).default([]),
+  alerts: z.array(alertSchema).default([]),
+});
+
+type IngestPayload = z.infer<typeof ingestSchema>;
 
 function sanitize(message: string): string {
   return message
@@ -51,12 +81,8 @@ function mapKindToType(kind: string): AlertType {
   return map[kind] ?? "UNKNOWN";
 }
 
-async function handle(payload: any) {
-  const { vehicle: vehicleInput, readings = [], alerts = [] } = payload;
-
-  if (!vehicleInput?.label || !vehicleInput?.tankSize) {
-    return Response.json({ error: "Missing vehicle label or tankSize" }, { status: 400 });
-  }
+async function handle(payload: IngestPayload) {
+  const { vehicle: vehicleInput, readings, alerts } = payload;
 
   const vehicle = await db.vehicle.upsert({
     where: { label: vehicleInput.label },
@@ -66,15 +92,14 @@ async function handle(payload: any) {
 
   if (readings.length > 0) {
     const validReadings = readings
-      .map((r: any) => ({
+      .map((r) => ({
         vehicleId: vehicle.id,
         timestamp: new Date(r.timestamp),
         level: r.level,
-        speed: r.speed ?? 0,
-        accel: r.accel ?? 0,
+        speed: r.speed,
+        accel: r.accel,
       }))
-      .filter((r: { level: number; timestamp: Date }) =>
-        r.level >= 0 && !isNaN(r.timestamp.getTime()));
+      .filter((r) => !isNaN(r.timestamp.getTime()));
 
     if (validReadings.length > 0) {
       await db.fuelReading.createMany({
@@ -101,16 +126,16 @@ async function handle(payload: any) {
     };
 
     const alertData: AlertRow[] = [];
-    for (const a of alerts as any[]) {
+    for (const a of alerts) {
       const ts = new Date(a.timestamp);
       if (isNaN(ts.getTime())) continue;
       const atIndex = allReadings.filter((r) => r.timestamp <= ts).length - 1;
       alertData.push({
         vehicleId: vehicle.id,
         type: mapKindToType(a.kind ?? a.type ?? ""),
-        confidence: typeof a.confidence === "number" ? a.confidence : 0.5,
+        confidence: a.confidence,
         reason: a.explanation ?? a.reason ?? "detected by simulator",
-        dropAmount: typeof a.dropAmount === "number" ? a.dropAmount : 0,
+        dropAmount: a.dropAmount,
         atIndex: Math.max(0, atIndex),
       });
     }
@@ -134,14 +159,22 @@ export async function POST(request: Request) {
       return Response.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    let payload: any;
+    let raw: unknown;
     try {
-      payload = await request.json();
+      raw = await request.json();
     } catch {
       return Response.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    return await handle(payload);
+    const parsed = ingestSchema.safeParse(raw);
+    if (!parsed.success) {
+      return Response.json(
+        { error: "Invalid payload", issues: parsed.error.issues },
+        { status: 400 },
+      );
+    }
+
+    return await handle(parsed.data);
   } catch (error) {
     console.error("[api/fuel/ingest]", error);
     return Response.json(
