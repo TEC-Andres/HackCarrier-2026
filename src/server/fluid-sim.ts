@@ -70,7 +70,13 @@ export type TubeSpec = {
 
 export type FluidSimulation = {
   fps: number;
+  /** wall-clock playback seconds */
   duration: number;
+  /** sim seconds covered (= duration * timeScale) */
+  simDuration: number;
+  /** sim seconds per wall second */
+  timeScale: number;
+  scenario?: FluidScenarioId;
   frames: FluidFrame[];
   radius: number;
   height: number;
@@ -83,12 +89,92 @@ export type FluidSimulation = {
   tubeRadius: number;
 };
 
+export const FLUID_SCENARIO_IDS = [
+  "pothole",
+  "slow_leak",
+  "theft",
+  "potholes",
+] as const;
+export type FluidScenarioId = (typeof FLUID_SCENARIO_IDS)[number];
+
 export type FluidOptions = {
+  /** Wall-clock seconds of playback (scenarios max 10 → 20 s sim @ 2×). */
   duration?: number;
+  /** Playback FPS (scenarios default 6). */
   fps?: number;
   seed?: number;
   maxParticles?: number;
+  /** Challenge event clip; uses timeScale 2 by default. */
+  scenario?: FluidScenarioId;
+  /** sim seconds per wall second (scenarios default 2). */
+  timeScale?: number;
 };
+
+type Impact = { t: number; amp: number; cx: number; cy: number };
+
+/**
+ * Impact schedule in **sim time**. Same relative event structure as
+ * simulator/scenarios.py + visual3d scenario_scripts, compressed to ≤20 s.
+ */
+function scenarioImpacts(scenario?: FluidScenarioId): Impact[] {
+  switch (scenario) {
+    case "pothole":
+      // single bump; level unchanged — sensors diverge then recover
+      return [
+        { t: 4.5, amp: 9.5, cx: 0.02, cy: -0.015 },
+        { t: 5.6, amp: 4.0, cx: -0.02, cy: 0.02 },
+      ];
+    case "potholes": {
+      // road full of potholes — repeated kicks across the clip
+      const times = [1.5, 3.5, 5.5, 8, 10.5, 13, 15.5, 18];
+      return times.map((t, i) => ({
+        t,
+        amp: 4.5 + (i % 3) * 1.4,
+        cx: ((i % 5) - 2) * 0.012,
+        cy: ((i % 3) - 1) * 0.014,
+      }));
+    }
+    case "slow_leak":
+      // mild road noise; main effect is sustained level drop
+      return [
+        { t: 1.2, amp: 3.2, cx: 0, cy: 0 },
+        { t: 9, amp: 2.4, cx: 0.01, cy: -0.01 },
+      ];
+    case "theft":
+      // settle, then siphon disturbance when theft starts (t=8)
+      return [
+        { t: 1.0, amp: 2.8, cx: 0, cy: 0 },
+        { t: 8.0, amp: 5.5, cx: -0.015, cy: 0.01 },
+        { t: 12.0, amp: 3.0, cx: 0.01, cy: -0.015 },
+      ];
+    default:
+      return [
+        { t: 0.4, amp: 8.5, cx: 0.0, cy: 0.0 },
+        { t: 2.0, amp: 7.0, cx: 0.03, cy: -0.02 },
+        { t: 3.3, amp: 6.5, cx: -0.02, cy: 0.03 },
+        { t: 4.5, amp: 6.0, cx: 0.02, cy: 0.02 },
+        { t: 5.6, amp: 5.5, cx: -0.01, cy: -0.03 },
+      ];
+  }
+}
+
+/** Mean-level dh/dt (m per sim second) from the scenario flows. */
+function scenarioLevelRate(
+  scenario: FluidScenarioId | undefined,
+  tSim: number,
+): number {
+  if (scenario === "slow_leak") {
+    // ~0.5 L/min narrative → visible sustained drain after t=4 s
+    return tSim >= 4 ? -0.0042 : 0;
+  }
+  if (scenario === "theft") {
+    // sudden siphon while parked (engine off from t=3, theft from t=8)
+    if (tSim >= 8 && tSim < 17) return -0.014;
+    return 0;
+  }
+  // pothole / potholes / default: true level holds (noise only)
+  return -0.00002;
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
@@ -896,8 +982,16 @@ const TAPS = [
 export function generateFluidSimulation(
   opts: FluidOptions = {},
 ): FluidSimulation {
-  const duration = clamp(opts.duration ?? 6, 5, 8);
-  const fps = opts.fps ?? 12;
+  const scenario = opts.scenario;
+  const isScenario = scenario !== undefined;
+  const timeScale = clamp(opts.timeScale ?? (isScenario ? 2 : 1), 1, 4);
+  // wall seconds: scenarios 10 (= 20 sim @ 2×); legacy splash 5–8
+  const duration = clamp(
+    opts.duration ?? (isScenario ? 10 : 6),
+    isScenario ? 5 : 5,
+    isScenario ? 10 : 8,
+  );
+  const fps = Math.round(opts.fps ?? (isScenario ? 6 : 12));
   const seed = opts.seed ?? 3;
   const maxParticles = opts.maxParticles ?? 1600;
   const radius = 0.15;
@@ -905,10 +999,12 @@ export function generateFluidSimulation(
   const h0 = 0.78 * height;
   const rho = 1000;
   const maxSpeed = 4.2;
-  const frameDt = 1 / fps;
-  const steps = 5;
-  const dt = frameDt / steps;
+  const frameDt = 1 / fps; // wall seconds per frame
+  const simFrameDt = frameDt * timeScale; // sim seconds per frame
+  const steps = isScenario ? 4 : 5;
+  const dt = simFrameDt / steps;
   const nFrames = Math.round(duration * fps);
+  const simDuration = duration * timeScale;
 
   const rand = mulberry32(seed);
   const modes: Mode[] = [
@@ -924,18 +1020,14 @@ export function generateFluidSimulation(
   const tubeState = [h0, h0, h0];
   const tubeTau = 0.45; // faster visual lag at 12 fps
 
-  const impacts: Array<{ t: number; amp: number; cx: number; cy: number }> = [
-    { t: 0.4, amp: 8.5, cx: 0.0, cy: 0.0 },
-    { t: 2.0, amp: 7.0, cx: 0.03, cy: -0.02 },
-    { t: 3.3, amp: 6.5, cx: -0.02, cy: 0.03 },
-    { t: 4.5, amp: 6.0, cx: 0.02, cy: 0.02 },
-    { t: 5.6, amp: 5.5, cx: -0.01, cy: -0.03 },
-  ];
+  const impacts = scenarioImpacts(scenario);
   let impactIdx = 0;
   let ax = 0;
   let ay = 0;
   let bumpT0 = -1;
   let bumpAmp = 0;
+  let engineOn = true;
+  let theftOn = false;
 
   const frames: FluidFrame[] = [];
   const surfaceNr = 32;
@@ -974,9 +1066,15 @@ export function generateFluidSimulation(
   ];
 
   for (let f = 0; f < nFrames; f++) {
-    const t0 = f * frameDt;
+    const t0 = f * simFrameDt; // sim time at frame start
     for (let s = 0; s < steps; s++) {
       const t = t0 + s * dt;
+
+      // scenario context flags (sim time)
+      if (scenario === "theft") {
+        if (t >= 3) engineOn = false;
+        if (t >= 8) theftOn = true;
+      }
 
       while (impactIdx < impacts.length && impacts[impactIdx]!.t <= t) {
         const im = impacts[impactIdx]!;
@@ -1001,18 +1099,32 @@ export function generateFluidSimulation(
           ax = bumpAmp * Math.exp(-dtd / 0.8) * Math.sin(2 * Math.PI * 1.7 * dtd);
         }
       }
+      // gentle idle road vibration while "driving" (not during theft)
+      if (!theftOn && engineOn) {
+        ax += 0.08 * Math.sin(2 * Math.PI * 0.35 * t);
+        ay += 0.05 * Math.sin(2 * Math.PI * 0.27 * t + 1.1);
+      }
 
       if (!primed && t >= 0.25) {
         primed = true;
-        burst(pool, modes, radius, h, 1.4, 0, 0, maxSpeed);
+        const primeAmp =
+          scenario === "pothole" || scenario === "potholes" ? 1.6 : 1.1;
+        burst(pool, modes, radius, h, primeAmp, 0, 0, maxSpeed);
         lastBurst = t;
       }
 
       integrateModes(modes, h, ax, ay, dt, radius);
-      h = Math.min(Math.max(h - 0.00002 * dt, 0), height);
+      // mean level: scenario flows (leak/theft) + tiny baseline drain
+      h = Math.min(
+        Math.max(h + scenarioLevelRate(scenario, t) * dt, 0),
+        height,
+      );
 
       stepParticles(pool, modes, radius, height, h, dt, rho, 16);
-      emitSpray(pool, modes, radius, h, dt, 0.045, 6.5, 36);
+      // less airborne spray when level is draining steadily (leak/theft)
+      const sprayGain =
+        scenario === "slow_leak" || scenario === "theft" ? 0.028 : 0.045;
+      emitSpray(pool, modes, radius, h, dt, sprayGain, 6.5, 36);
 
       const local = SENSORS.map((s) => {
         const r = s.rFrac * radius;
@@ -1044,6 +1156,9 @@ export function generateFluidSimulation(
   return {
     fps,
     duration,
+    simDuration: Math.round(simDuration * 1000) / 1000,
+    timeScale,
+    scenario,
     frames,
     radius,
     height,
