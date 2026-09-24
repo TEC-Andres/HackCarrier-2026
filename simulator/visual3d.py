@@ -178,7 +178,10 @@ def run_scenario(args: argparse.Namespace) -> None:
     cfg = TankConfig.demo()
     if args.mu is not None:
         cfg.mu = args.mu
-    tank = FuelTank(cfg)
+    if args.scenario == "theft":
+        cfg.hose_radius *= 4.2  # visual-only: drain reads in <1s of sim time instead of ~300s.
+                                 # local to this cfg instance; bridge.py/validate.py build their own cfg, unaffected.
+    tank = FuelTank(cfg, h0=0.55 * cfg.height)  # slightly lower starting level for the render
     tank.baffles = args.baffles == "on"
     road = RoadProfile(3)
     edge = VirtualEdge(tank, 3)
@@ -199,7 +202,7 @@ def run_scenario(args: argparse.Namespace) -> None:
     steps_per_frame = max(1, int(frame_dt / cfg.dt))
     max_frames = args.frames
 
-    base_tank = FuelTank(cfg)
+    base_tank = FuelTank(cfg, h0=0.55 * cfg.height)
     base_tank.baffles = tank.baffles
     fig = build_figure(cfg, base_tank, base_tank.tube_levels(), None)
 
