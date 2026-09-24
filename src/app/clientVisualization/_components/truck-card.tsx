@@ -3,6 +3,7 @@
 import { Fuel, MapPin, Route } from "lucide-react";
 import { Badge } from "~/app/_components/ui/badge";
 import { Card, CardContent } from "~/app/_components/ui/card";
+import { FuelLevelChart } from "~/app/mapDashboard/_components/fuel-level-chart";
 import { api } from "~/trpc/react";
 
 /** A real DB-backed alert or a hardcoded demo one, normalized for display. */
@@ -49,6 +50,26 @@ function LatestLevel({ vehicleId }: { vehicleId: string }) {
   const reading = query.data?.[0];
   if (query.isError || !reading) return <span className="text-muted-foreground">—</span>;
   return <>{reading.level.toFixed(1)}</>;
+}
+
+function FuelGraph({ vehicleId }: { vehicleId: string }) {
+  const query = api.fuel.getLatestReadings.useQuery({ vehicleId, take: 60 });
+  if (query.isPending) {
+    return (
+      <div
+        className="h-40 w-full animate-pulse rounded-md border border-border bg-muted/40"
+        aria-hidden="true"
+      />
+    );
+  }
+  if (query.isError) {
+    return (
+      <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-destructive/40 px-4 text-center text-xs text-destructive">
+        No se pudo cargar el historial de combustible.
+      </div>
+    );
+  }
+  return <FuelLevelChart readings={query.data ?? []} />;
 }
 
 function Stat({ label, children }: { label: string; children: React.ReactNode }) {
@@ -120,6 +141,13 @@ export function TruckCard({ truck }: { truck: ClientTruck }) {
             </span>
           </Stat>
         </dl>
+
+        {truck.dbId && (
+          <div className="border-t border-border pt-3">
+            <p className="mb-2 text-xs text-muted-foreground">Nivel de combustible</p>
+            <FuelGraph vehicleId={truck.dbId} />
+          </div>
+        )}
 
         {latest && (
           <div
