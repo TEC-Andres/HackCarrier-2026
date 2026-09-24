@@ -68,3 +68,28 @@ curl -X POST http://127.0.0.1:3000/api/trpc/post.helloBackend
 # after deploy:
 curl https://<your-app>.vercel.app/api/hello
 ```
+
+### Fuel anomaly detection (serverless)
+
+`/api/detect` and tRPC `vehicle.detect` run the detector **as serverless functions**: each
+invocation reads `FuelReading` rows from Neon, runs `detectAnomalies` inside the function,
+and inserts only new `Alert`s (idempotent via `@@unique([vehicleId, atIndex])`, so replaying
+the function never duplicates alerts). Messages stay stateless; calculations keep their
+inputs and outputs in Neon.
+
+Setup (once):
+
+```bash
+npm run db:push   # create tables on Neon
+npm run db:seed   # 48h of synthetic readings (~576 rows)
+```
+
+Invoke:
+
+```bash
+curl http://127.0.0.1:3000/api/detect
+curl -X POST http://127.0.0.1:3000/api/trpc/vehicle.detect
+# after deploy:
+curl https://<your-app>.vercel.app/api/detect
+npm run detect:test   # local CLI check against Neon
+```

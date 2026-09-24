@@ -7,4 +7,7 @@ if (existsSync(".env.local")) {
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
+  migrations: {
+    seed: "tsx prisma/seed.ts",
+  },
 });
